@@ -19,5 +19,6 @@ for i in $(seq 1 $runs); do
         echo '***' FAILED TESTS IN TRIAL $i
         exit 1
     fi
+    echo '***' PASSED PROGRESS: $i / $runs
 done
 echo '***' PASSED ALL $i TESTING TRIALS

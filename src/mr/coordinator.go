@@ -1,7 +1,6 @@
 package mr
 
 import (
-	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -28,12 +27,13 @@ type Coordinator struct {
 
 
 func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
+	//process request information
 	switch request.TaskType{
 		case 1 :{
 			c.mu.Lock()
 			if c.statusMap[request.TaskId]==1{
 				c.statusMap[request.TaskId]=2
-				fmt.Printf("MapTask%v:over\n",request.TaskId)
+				// fmt.Printf("MapTask%v:over\n",request.TaskId)
 				c.edMap++
 			}
 			c.mu.Unlock()
@@ -42,17 +42,18 @@ func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
 			c.mu.Lock()
 			if c.statusReduce[request.TaskId]==1{
 				c.statusReduce[request.TaskId]=2
-				fmt.Printf("ReduceTask%v:over\n",request.TaskId)
+				// fmt.Printf("ReduceTask%v:over\n",request.TaskId)
 				c.edReduce++
 			}
 			c.mu.Unlock()
 		}
 		default:{}
 	}
-
 	request.TaskType=0
+
+	//allocate task
 	c.mu.Lock()
-	fmt.Printf("%v/%v,%v/%v\n",c.edMap,c.nMap,c.edReduce,c.nReduce)
+	// fmt.Printf("MapTask Progress: %v/%v,ReduceTask Progress: %v/%v\n",c.edMap,c.nMap,c.edReduce,c.nReduce)
 	if c.edMap<c.nMap{
 		taskId:=-1
 		for i :=0;i<c.nMap;i++{
@@ -71,7 +72,7 @@ func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
 			reply.FileName=c.files[taskId]
 			reply.NMap=c.nMap
 			reply.NReduce=c.nReduce	
-			fmt.Printf("MapTask:%v allocated\n",reply.TaskId)
+			// fmt.Printf("MapTask:%v allocated\n",reply.TaskId)
 			c.statusMap[taskId]=1
 			c.mu.Unlock()
 			
@@ -103,7 +104,7 @@ func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
 			reply.NMap=c.nMap
 			reply.NReduce=c.nReduce	
 			c.statusReduce[taskId]=1
-			fmt.Printf("ReduceTask:%v allocated\n",reply.TaskId)
+			// fmt.Printf("ReduceTask:%v allocated\n",reply.TaskId)
 			c.mu.Unlock()
 			
 			go func(){
@@ -120,7 +121,6 @@ func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
 		c.mu.Unlock()
 	}
 		
-	// fmt.Println(&reply,reply.TaskType,reply.Taskid,reply.Filename,reply.NReduce,reply.NMap)
 	return nil
 }
 		
@@ -164,12 +164,8 @@ func (c *Coordinator) Done() bool {
 	ret := c.nReduce==c.edReduce
 	c.mu.Unlock()
 	return ret
+	// return true
 }
-// func (c *Coordinator) Done() bool {
-// 	// Your code here.
-	
-// 	return true
-// }
 
 //
 // create a Coordinator.

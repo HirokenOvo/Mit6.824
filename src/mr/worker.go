@@ -1,15 +1,16 @@
 package mr
 
-import ("fmt"
-		"log"
-		"net/rpc"
-		"hash/fnv"
-		"encoding/json"
-		"io/ioutil"
-		"os"
-		"strconv"
-		"sort"
-		"time"
+import (
+	"encoding/json"
+	"fmt"
+	"hash/fnv"
+	"io/ioutil"
+	"log"
+	"net/rpc"
+	"os"
+	"sort"
+	"strconv"
+	"time"
 )
 
 //
@@ -102,7 +103,7 @@ func solveReduce(reducef func(string,[]string)string,request *Request,reply *Rep
 	}
 	//reduce process and store
 	sort.Sort(ByKey(intermediate))
-
+	
 	oname := "mr-out-"+strconv.Itoa(reply.TaskId)
 	ofile, _ := os.Create(oname)
 	i := 0
@@ -116,15 +117,15 @@ func solveReduce(reducef func(string,[]string)string,request *Request,reply *Rep
 			values = append(values, intermediate[k].Value)
 		}
 		output := reducef(intermediate[i].Key, values)
-
+		
 		// this is the correct format for each line of Reduce output.
 		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-
+		
 		i = j
 	}
-
+	
 	ofile.Close()
-
+	
 	//delete tmpfile
 	for i:=0;i<reply.NMap;i=i+1{
 		fileName:="mr-"+strconv.Itoa(i)+"-"+strconv.Itoa(reply.TaskId)
@@ -133,7 +134,7 @@ func solveReduce(reducef func(string,[]string)string,request *Request,reply *Rep
 			log.Fatalf("cannot open delete" + fileName)
 		}
 	}
-
+	
 	request.TaskType=2
 	request.TaskId=reply.TaskId
 }
@@ -142,40 +143,40 @@ func solveReduce(reducef func(string,[]string)string,request *Request,reply *Rep
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
-	reducef func(string, []string) string) {
-
+reducef func(string, []string) string) {
 	// Your worker implementation here.
 	request := Request{}
 	reply := Reply{}
 	for
 	{
-		fmt.Println("--------------------------------------------------")
-		fmt.Println(":",&reply)
+		// fmt.Println("--------------------------------------------------")
+		// fmt.Println(":",&reply)
 		ok := call("Coordinator.Allocate",&request,&reply)
-		fmt.Println("::",&reply)
+		// fmt.Println("::",&reply)
 
-		// fmt.Printf("de::%p %v %v %v %v %v\n",&reply,reply.TaskType,reply.TaskId,reply.FileName,reply.NReduce,reply.NMap)
 		if ok {
 			switch reply.TaskType {
 				case 1 ://Map
 				{
-					fmt.Printf("MapTask:%v is running...\n",reply.TaskId)
+					// fmt.Printf("MapTask:%v is running...\n",reply.TaskId)
 					solveMap(mapf,&request,&reply)
 				}
 				case 2 ://Reduce
 				{
-					fmt.Printf("ReduceTask:%v is running...\n",reply.TaskId)
+					// fmt.Printf("ReduceTask:%v is running...\n",reply.TaskId)
 					solveReduce(reducef,&request,&reply) 
 				}
 				case 3://wait
-					fmt.Println("The task is allocated, waiting...")
+					// fmt.Println("The tasks are all allocated, waiting...")
 				default:
 				{
-					fmt.Println("MapReduce Task all over,process exited")
+					// fmt.Println("MapReduce Tasks all over,process exited")
 					return			
 				}
 			}
-			time.Sleep(time.Second)
+			reply.TaskType=0
+			reply.TaskId=0
+			time.Sleep(time.Second/2)
 		}else{
 			return
 		}
