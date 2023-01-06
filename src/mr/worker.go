@@ -1,10 +1,16 @@
 package mr
 
-import "fmt"
-import "log"
-import "net/rpc"
-import "hash/fnv"
-
+import ("fmt"
+		"log"
+		"net/rpc"
+		"hash/fnv"
+		"encoding/json"
+		"io/ioutil"
+		"os"
+		"strconv"
+		"sort"
+		"time"
+)
 
 //
 // Map functions return a slice of KeyValue.
@@ -24,6 +30,113 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
+
+func solveMap(mapf func(string,string) []KeyValue,request *Request,reply *Reply){
+	//load data
+	file,err:=os.Open(reply.FileName)
+	if err!=nil{
+		log.Fatalf("cannot open %v", reply.FileName)
+	}
+	content, err := ioutil.ReadAll(file)
+	if err != nil {
+		log.Fatalf("cannot read %v", file)
+	}
+	file.Close()
+	
+	//map process
+	intermediate := mapf(reply.FileName, string(content))
+
+	//buckets allocate 
+	buckets:=make([][]KeyValue,reply.NReduce)
+	for i :=0;i<reply.NReduce;i++{
+		buckets[i]=[]KeyValue{}
+	}
+	for _,kv:=range(intermediate){
+		reduceId:=ihash(kv.Key)%reply.NReduce
+		buckets[reduceId]=append(buckets[reduceId],kv)
+	}
+	
+	//store
+	mapId:=reply.TaskId
+	for i :=0;i<reply.NReduce;i++{
+		targetName:="mr-"+strconv.Itoa(mapId)+"-"+strconv.Itoa(i)
+		tmpName,_:=ioutil.TempFile("",targetName+".tmp")
+		enc := json.NewEncoder(tmpName)
+		for _,kv:=range(buckets[i]){
+			err := enc.Encode(&kv)
+			if err!=nil{
+				log.Fatalf("cannot write %v", tmpName)
+			}
+		}
+		os.Rename(tmpName.Name(),targetName)
+		tmpName.Close()
+	}
+	request.TaskType=1
+	request.TaskId=reply.TaskId
+}
+
+func solveReduce(reducef func(string,[]string)string,request *Request,reply *Reply){
+	//load data
+	intermediate:=[]KeyValue{}
+	for i:=0;i<reply.NMap;i++{
+		fileName:="mr-"+strconv.Itoa(i)+"-"+strconv.Itoa(reply.TaskId)
+		file,err:=os.Open(fileName)
+		if err!=nil{
+			log.Fatalf("cannot open %v", fileName)
+		}
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		file.Close()
+	}
+	//reduce process and store
+	sort.Sort(ByKey(intermediate))
+
+	oname := "mr-out-"+strconv.Itoa(reply.TaskId)
+	ofile, _ := os.Create(oname)
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
+
+	//delete tmpfile
+	for i:=0;i<reply.NMap;i=i+1{
+		fileName:="mr-"+strconv.Itoa(i)+"-"+strconv.Itoa(reply.TaskId)
+		err := os.Remove(fileName)
+		if err != nil {
+			log.Fatalf("cannot open delete" + fileName)
+		}
+	}
+
+	request.TaskType=2
+	request.TaskId=reply.TaskId
+}
 
 //
 // main/mrworker.go calls this function.
@@ -32,7 +145,41 @@ func Worker(mapf func(string, string) []KeyValue,
 	reducef func(string, []string) string) {
 
 	// Your worker implementation here.
+	request := Request{}
+	reply := Reply{}
+	for
+	{
+		fmt.Println("--------------------------------------------------")
+		fmt.Println(":",&reply)
+		ok := call("Coordinator.Allocate",&request,&reply)
+		fmt.Println("::",&reply)
 
+		// fmt.Printf("de::%p %v %v %v %v %v\n",&reply,reply.TaskType,reply.TaskId,reply.FileName,reply.NReduce,reply.NMap)
+		if ok {
+			switch reply.TaskType {
+				case 1 ://Map
+				{
+					fmt.Printf("MapTask:%v is running...\n",reply.TaskId)
+					solveMap(mapf,&request,&reply)
+				}
+				case 2 ://Reduce
+				{
+					fmt.Printf("ReduceTask:%v is running...\n",reply.TaskId)
+					solveReduce(reducef,&request,&reply) 
+				}
+				case 3://wait
+					fmt.Println("The task is allocated, waiting...")
+				default:
+				{
+					fmt.Println("MapReduce Task all over,process exited")
+					return			
+				}
+			}
+			time.Sleep(time.Second)
+		}else{
+			return
+		}
+	}
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
 
