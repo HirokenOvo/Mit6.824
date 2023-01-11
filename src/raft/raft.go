@@ -19,7 +19,7 @@ package raft
 
 import (
 	//	"bytes"
-	"log"
+	// "log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -95,12 +95,14 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	// var term int
-	// var isleader bool
+	rf.mu.Lock()
+	var term int
+	var isleader bool
 	// // Your code here (2A).
-	// return term, isleader
-	return rf.currentTerm, rf.state == LEADER
+	term = rf.currentTerm
+	isleader = rf.state == LEADER
+	rf.mu.Unlock()
+	return term, isleader
 }
 
 //
@@ -208,7 +210,12 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 }
 
 func (rf *Raft) leaderHeartBeat() {
-	for rf.state == LEADER {
+	for {
+		rf.mu.Lock()
+		if rf.state != LEADER {
+			rf.mu.Unlock()
+			break
+		}
 		args := AppendEntriesArgs{Term: rf.currentTerm,
 			LeaderId:     rf.me,
 			PreLogIndex:  len(rf.log) - 1,
@@ -216,6 +223,7 @@ func (rf *Raft) leaderHeartBeat() {
 			Entries:      make([]Entry, 0),
 			LeaderCommit: rf.commitIndex,
 		}
+		rf.mu.Unlock()
 		for peer := range rf.peers {
 			go func(peer int) {
 				if peer == rf.me {
@@ -224,16 +232,19 @@ func (rf *Raft) leaderHeartBeat() {
 				reply := AppendEntriesReply{}
 				ok := rf.sendAppendEntries(peer, &args, &reply)
 				if ok {
-					if reply.Success {
-						log.Printf("Peer[%d] success transmit heartbeat to Peer[%d]", rf.me, peer)
-					}
+					// if reply.Success {
+					// log.Printf("Peer[%d] success transmit heartbeat to Peer[%d]", rf.me, peer)
+					// }
+					rf.mu.Lock()
 					if !reply.Success && reply.Term > rf.currentTerm {
 						rf.state = FOLLOWER
-						log.Printf("find Term bigger then Peer[%d],became follower", rf.me)
+						// log.Printf("find Term bigger then Peer[%d],became follower", rf.me)
+						rf.mu.Unlock()
 						return
 					}
+					rf.mu.Unlock()
 				} else {
-					log.Printf("Peer[%d] can't receive leader[%d]'s heartbeat", peer, rf.me)
+					// log.Printf("Peer[%d] can't receive leader[%d]'s heartbeat", peer, rf.me)
 				}
 
 			}(peer)
@@ -272,7 +283,6 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
-
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.VoteGranted = false
@@ -337,21 +347,23 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) startElection() {
+	rf.mu.Lock()
 	rf.state = CANDIDATE
 	rf.votedFor = rf.me
 	rf.currentTerm++
-
-	mu := sync.Mutex{}
-	cond := sync.NewCond(&mu)
-	cnt := 1      //接收到选票数
-	finished := 1 //接收到总响应数
 
 	args := RequestVoteArgs{Term: rf.currentTerm,
 		CandidateID:  rf.me,
 		LastLogIndex: len(rf.log) - 1,
 		LastLogTerm:  rf.log[len(rf.log)-1].Term}
+	rf.mu.Unlock()
+
+	cond := sync.NewCond(&sync.Mutex{})
+	cnt := 1      //接收到选票数
+	finished := 1 //接收到总响应数
 
 	for peer := range rf.peers {
+		rf.mu.Lock()
 		if rf.state == CANDIDATE {
 			go func(peer int) {
 				if peer == rf.me {
@@ -360,40 +372,42 @@ func (rf *Raft) startElection() {
 				reply := RequestVoteReply{}
 				ok := rf.sendRequestVote(peer, &args, &reply)
 				if ok {
-					mu.Lock()
+					cond.L.Lock()
+					defer cond.L.Unlock()
 					if reply.VoteGranted {
-						log.Printf("Peer[%d] voted Peer[%d]", peer, rf.me)
+						// log.Printf("Peer[%d] voted Peer[%d]", peer, rf.me)
 						cnt++
 					} else {
+						rf.mu.Lock()
+						defer rf.mu.Unlock()
 						if reply.Term > rf.currentTerm {
 							rf.state = FOLLOWER
-							mu.Unlock()
-							log.Printf("find Term bigger then Peer[%d],failed to become leader", rf.me)
+							// log.Printf("find Term bigger then Peer[%d],failed to become leader", rf.me)
 							return
 						}
 					}
 					finished++
-					mu.Unlock()
 					cond.Broadcast()
 				} else {
-					log.Printf("call peer[%d] failed", peer)
+					// log.Printf("call peer[%d] failed", peer)
 				}
 			}(peer)
 		}
+		rf.mu.Unlock()
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
+	cond.L.Lock()
+	defer cond.L.Unlock()
 	for finished != len(rf.peers) && cnt*2 < len(rf.peers) {
 		cond.Wait()
 	}
 
 	if cnt*2 >= len(rf.peers) && rf.state == CANDIDATE {
 		rf.state = LEADER
-		log.Printf("Peer[%d] become new leader", rf.me)
+		// log.Printf("Peer[%d] become new leader", rf.me)
 		go rf.leaderHeartBeat()
 	} else {
-		log.Printf("Peer[%d] failed to become leader", rf.me)
+		// log.Printf("Peer[%d] failed to become leader", rf.me)
 	}
 
 }
@@ -457,7 +471,7 @@ func (rf *Raft) ticker() {
 		rf.mu.Lock()
 		// log.Printf("%d %d %d", rf.me, electionTimeOut, time.Now().UnixMilli()-rf.lastTime)
 		if electionTimeOut+rf.lastTime <= time.Now().UnixMilli() && rf.state != LEADER {
-			log.Printf("Peer[%d] try to become leader", rf.me)
+			// log.Printf("Peer[%d] try to become leader", rf.me)
 			go rf.startElection()
 		}
 		rf.mu.Unlock()
@@ -497,6 +511,5 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-	log.Printf("raftNode[%d] start", rf.me)
 	return rf
 }
