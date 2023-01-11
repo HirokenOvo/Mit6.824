@@ -76,14 +76,14 @@ func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
 			c.statusMap[taskId]=1
 			c.mu.Unlock()
 			
-			go func(){
+			go func(taskId int){
 				time.Sleep(time.Duration(10)*time.Second)
 				c.mu.Lock()
 				if c.statusMap[taskId]==1{
 					c.statusMap[taskId]=0
 				}
 				c.mu.Unlock()
-			}()
+			}(taskId)
 		}
 	}else if c.edReduce<c.nReduce{
 		taskId:=-1
@@ -107,14 +107,14 @@ func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
 			// fmt.Printf("ReduceTask:%v allocated\n",reply.TaskId)
 			c.mu.Unlock()
 			
-			go func(){
+			go func(taskId int){
 				time.Sleep(time.Duration(10)*time.Second)
 				c.mu.Lock()
 				if c.statusReduce[taskId]==1{
 					c.statusReduce[taskId]=0
 				}
 				c.mu.Unlock()
-			}()
+			}(taskId)
 		}
 	}else{
 		reply.TaskType=4
