@@ -238,6 +238,7 @@ func (rf *Raft) leaderHeartBeat() {
 					rf.mu.Lock()
 					if !reply.Success && reply.Term > rf.currentTerm {
 						rf.state = FOLLOWER
+						rf.currentTerm = reply.Term
 						// log.Printf("find Term bigger then Peer[%d],became follower", rf.me)
 						rf.mu.Unlock()
 						return
@@ -382,6 +383,7 @@ func (rf *Raft) startElection() {
 						defer rf.mu.Unlock()
 						if reply.Term > rf.currentTerm {
 							rf.state = FOLLOWER
+							rf.commitIndex = reply.Term
 							// log.Printf("find Term bigger then Peer[%d],failed to become leader", rf.me)
 							return
 						}
@@ -401,14 +403,16 @@ func (rf *Raft) startElection() {
 	for finished != len(rf.peers) && cnt*2 < len(rf.peers) {
 		cond.Wait()
 	}
-
+	rf.mu.Lock()
 	if cnt*2 >= len(rf.peers) && rf.state == CANDIDATE {
 		rf.state = LEADER
 		// log.Printf("Peer[%d] become new leader", rf.me)
 		go rf.leaderHeartBeat()
 	} else {
+		rf.state = FOLLOWER
 		// log.Printf("Peer[%d] failed to become leader", rf.me)
 	}
+	rf.mu.Unlock()
 
 }
 
