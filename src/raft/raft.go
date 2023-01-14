@@ -29,10 +29,13 @@ import (
 	"6.824/labrpc"
 )
 
-const FOLLOWER int = 0
-const CANDIDATE int = 1
-const LEADER int = 2
-const HEARTSBEATS_INTERVAL int64 = 150
+const (
+	FOLLOWER             int           = 0
+	CANDIDATE            int           = 1
+	LEADER               int           = 2
+	HEARTSBEATS_INTERVAL time.Duration = time.Duration(150) * time.Millisecond
+	TIMEINF              time.Duration = time.Duration(100000) * time.Hour
+)
 
 func max(a int, b int) int {
 	if a >= b {
@@ -48,19 +51,39 @@ func min(a int, b int) int {
 	return b
 }
 
-func (rf *Raft) becomeLeader() {
-
+func getRandTimeout() time.Duration {
+	r := rand.New(rand.NewSource(time.Now().UnixMicro()))
+	electionTimeOut := r.Int63()%(600-450) + 450 //随机产生的选举超时时间 450ms<= x <=800ms
+	return time.Duration(electionTimeOut) * time.Millisecond
 }
 
-func (rf *Raft) becomeCandidate() {
-	rf.lastTime = time.Now().UnixMilli()
-	rf.state = CANDIDATE
-	rf.votedFor = rf.me
-	rf.currentTerm++
-}
-
-func (rf *Raft) becomeFollower() {
-
+func (rf *Raft) switchState(state int) {
+	if state == rf.state {
+		if state == FOLLOWER {
+			rf.votedFor = -1
+		}
+		return
+	}
+	rf.state = state
+	switch state {
+	case FOLLOWER:
+		rf.votedFor = -1
+		rf.heartBeatTimer.Stop()
+		rf.electionTimer.Reset(getRandTimeout())
+	case CANDIDATE:
+		rf.heartBeatTimer.Stop()
+	case LEADER:
+		rf.heartBeatTimer.Reset(HEARTSBEATS_INTERVAL)
+		rf.electionTimer.Stop()
+		go func() {
+			for peer := range rf.peers {
+				rf.mu.Lock()
+				rf.nextIndex[peer] = len(rf.log)
+				rf.matchIndex[peer] = 0
+				rf.mu.Unlock()
+			}
+		}()
+	}
 }
 
 //
@@ -111,13 +134,14 @@ type Raft struct {
 	votedFor    int     //当前任期内收到选票的 candidateId，如果没有投给任何候选人 则为空
 	log         []Entry //日志条目；每个条目包含了用于状态机的命令，以及领导人接收到该条目时的任期（初始索引为1）
 	//volatile state on all servers
-	commitIndex int   //已知已提交的最高的日志条目的索引（初始值为0，单调递增）
-	lastApplied int   //已经被应用到状态机的最高的日志条目的索引（初始值为0，单调递增）
-	state       int   //当前服务器的状态（follower,leader,candidate）
-	lastTime    int64 //最后一次接收到心跳的时间
+	commitIndex   int         //已知已提交的最高的日志条目的索引（初始值为0，单调递增）
+	lastApplied   int         //已经被应用到状态机的最高的日志条目的索引（初始值为0，单调递增）
+	state         int         //当前服务器的状态（follower,leader,candidate）
+	electionTimer *time.Timer //选举超时定时器
 	//volatile state on leaders
-	nextIndex  []int //对于每一台服务器，发送到该服务器的下一个日志条目的索引（初始值为领导人最后的日志条目的索引+1）
-	matchIndex []int //对于每一台服务器，已知的已经复制到该服务器的最高日志条目的索引（初始值为0，单调递增）
+	heartBeatTimer *time.Timer //发送心跳的定时器
+	nextIndex      []int       //对于每一台服务器，发送到该服务器的下一个日志条目的索引（初始值为领导人最后的日志条目的索引+1）
+	matchIndex     []int       //对于每一台服务器，已知的已经复制到该服务器的最高日志条目的索引（初始值为0，单调递增）
 
 	applyCh           chan ApplyMsg
 	appendEntriesCond sync.Cond
@@ -222,12 +246,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		return
 	}
 
-	rf.lastTime = time.Now().UnixMilli()
+	rf.electionTimer.Reset(getRandTimeout())
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
-		rf.state = FOLLOWER
-		rf.votedFor = -1
+		rf.switchState(FOLLOWER)
 	}
+
 	reply.Term = rf.currentTerm
 	reply.Success = true
 	//2	,3
@@ -254,51 +278,38 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) leaderHeartBeat() {
-	for {
-		rf.mu.Lock()
-		if rf.state != LEADER {
+func (rf *Raft) sendHeartBeat() {
+	rf.mu.Lock()
+	args := AppendEntriesArgs{Term: rf.currentTerm,
+		LeaderId:     rf.me,
+		PreLogIndex:  len(rf.log) - 1,
+		PreLogTerm:   rf.log[len(rf.log)-1].Term,
+		Entries:      make([]Entry, 0),
+		LeaderCommit: rf.commitIndex,
+	}
+	rf.mu.Unlock()
+	for peer := range rf.peers {
+		if peer == rf.me {
+			continue
+		}
+		go func(peer int) {
+			reply := AppendEntriesReply{}
+			ok := rf.sendAppendEntries(peer, &args, &reply)
+			if !ok {
+				log.Printf("Peer[%d] can't receive leader[%d]'s heartbeat", peer, rf.me)
+				return
+			}
+			// if reply.Success {
+			// 	log.Printf("leader[%d] success transmit heartbeat to Peer[%d]", rf.me, peer)
+			// }
+			rf.mu.Lock()
+			if !reply.Success && reply.Term > rf.currentTerm {
+				rf.currentTerm = reply.Term
+				rf.switchState(FOLLOWER)
+				log.Printf("find Term bigger then leader[%d],became follower", rf.me)
+			}
 			rf.mu.Unlock()
-			break
-		}
-		args := AppendEntriesArgs{Term: rf.currentTerm,
-			LeaderId:     rf.me,
-			PreLogIndex:  len(rf.log) - 1,
-			PreLogTerm:   rf.log[len(rf.log)-1].Term,
-			Entries:      make([]Entry, 0),
-			LeaderCommit: rf.commitIndex,
-		}
-		rf.mu.Unlock()
-		for peer := range rf.peers {
-			go func(peer int) {
-				if peer == rf.me {
-					return
-				}
-				reply := AppendEntriesReply{}
-				ok := rf.sendAppendEntries(peer, &args, &reply)
-				if ok {
-					if reply.Success {
-						log.Printf("leader[%d] success transmit heartbeat to Peer[%d]", rf.me, peer)
-					}
-					rf.mu.Lock()
-					if !reply.Success && reply.Term > rf.currentTerm {
-						rf.state = FOLLOWER
-						rf.votedFor = -1
-						rf.currentTerm = reply.Term
-						// log.Printf("find Term bigger then leader[%d],became follower", rf.me)
-						rf.mu.Unlock()
-						return
-					} else if !reply.Success {
-						log.Printf("%d error", peer)
-					}
-					rf.mu.Unlock()
-				} else {
-					log.Printf("Peer[%d] can't receive leader[%d]'s heartbeat", peer, rf.me)
-				}
-
-			}(peer)
-		}
-		time.Sleep(time.Duration(HEARTSBEATS_INTERVAL) * time.Millisecond)
+		}(peer)
 	}
 }
 
@@ -432,32 +443,29 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	reply.Term = rf.currentTerm
+	reply.VoteGranted = false
+
 	if rf.currentTerm > args.Term {
-		reply.Term = rf.currentTerm
-		reply.VoteGranted = false
-		rf.mu.Unlock()
 		return
 	}
 
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
-		rf.state = FOLLOWER
-		rf.votedFor = -1
+		rf.switchState(FOLLOWER)
 	}
-
-	reply.Term = rf.currentTerm
-	reply.VoteGranted = false
 
 	if rf.votedFor == -1 || rf.votedFor == args.CandidateID {
 		lastLogTerm := rf.log[len(rf.log)-1].Term
 		if lastLogTerm < args.LastLogTerm || (lastLogTerm == args.LastLogTerm && len(rf.log)-1 <= args.LastLogIndex) {
-			rf.state = FOLLOWER
+			rf.switchState(FOLLOWER)
 			rf.votedFor = args.CandidateID
-			rf.lastTime = time.Now().UnixMilli()
+			rf.electionTimer.Reset(getRandTimeout())
 			reply.VoteGranted = true
 		}
 	}
-	rf.mu.Unlock()
 
 }
 
@@ -497,8 +505,9 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 
 func (rf *Raft) startElection() {
 	rf.mu.Lock()
-	rf.becomeCandidate()
-
+	rf.currentTerm++
+	rf.votedFor = rf.me
+	rf.electionTimer.Reset(getRandTimeout())
 	args := RequestVoteArgs{Term: rf.currentTerm,
 		CandidateID:  rf.me,
 		LastLogIndex: len(rf.log) - 1,
@@ -510,41 +519,34 @@ func (rf *Raft) startElection() {
 	finished := 1 //接收到总响应数
 
 	for peer := range rf.peers {
-		rf.mu.Lock()
-		if rf.state == CANDIDATE {
-			go func(peer int) {
-				if peer == rf.me {
-					return
-				}
-				reply := RequestVoteReply{}
-				ok := rf.sendRequestVote(peer, &args, &reply)
-				if ok {
-					cond.L.Lock()
-					defer cond.L.Unlock()
-					if reply.VoteGranted {
-						// log.Printf("Peer[%d] voted Peer[%d]", peer, rf.me)
-						cnt++
-					} else {
-						rf.mu.Lock()
-						defer rf.mu.Unlock()
-						if reply.Term > rf.currentTerm {
-							rf.state = FOLLOWER
-							rf.commitIndex = reply.Term
-							rf.votedFor = -1
-							// log.Printf("find Term bigger then Peer[%d],failed to become leader", rf.me)
-							finished++
-							cond.Broadcast()
-							return
-						}
-					}
-					finished++
-					cond.Broadcast()
-				} else {
-					log.Printf("call peer[%d] failed", peer)
-				}
-			}(peer)
+		if peer == rf.me {
+			continue
 		}
-		rf.mu.Unlock()
+		go func(peer int) {
+			reply := RequestVoteReply{}
+			ok := rf.sendRequestVote(peer, &args, &reply)
+			if !ok {
+				log.Printf("peer[%d] call peer[%d] failed", rf.me, peer)
+				return
+			}
+
+			cond.L.Lock()
+			if reply.VoteGranted {
+				// log.Printf("Peer[%d] voted Peer[%d]", peer, rf.me)
+				cnt++
+			} else {
+				rf.mu.Lock()
+				if reply.Term > rf.currentTerm {
+					rf.switchState(FOLLOWER)
+					rf.currentTerm = reply.Term
+					// log.Printf("find Term bigger then Peer[%d],failed to become leader", rf.me)
+				}
+				rf.mu.Unlock()
+			}
+			finished++
+			cond.L.Unlock()
+			cond.Broadcast()
+		}(peer)
 	}
 
 	cond.L.Lock()
@@ -560,22 +562,10 @@ func (rf *Raft) startElection() {
 	}
 	rf.mu.Lock()
 	if cnt*2 >= len(rf.peers) && rf.state == CANDIDATE {
-		rf.state = LEADER
+		rf.switchState(LEADER)
 		log.Printf("Peer[%d] become new leader", rf.me)
-		go rf.leaderHeartBeat()
-		go rf.leaderAppendEntries()
-		//init leader state
-		go func() {
-			for peer := range rf.peers {
-				rf.mu.Lock()
-				rf.nextIndex[peer] = len(rf.log)
-				rf.matchIndex[peer] = 0
-				rf.mu.Unlock()
-			}
-		}()
+		go rf.sendHeartBeat()
 	} else {
-		rf.state = FOLLOWER
-		rf.votedFor = -1
 		// log.Printf("Peer[%d] failed to become leader", rf.me)
 	}
 	rf.mu.Unlock()
@@ -643,17 +633,22 @@ func (rf *Raft) ticker() {
 		// Your code here to check if a leader election should
 		// be started and to randomize sleeping time using
 		// time.Sleep().
-		r := rand.New(rand.NewSource(time.Now().UnixMicro()))
-		electionTimeOut := r.Int63()%(800-450) + 450 //随机产生的选举超时时间 450ms<= x <=800ms
-		time.Sleep(time.Duration(electionTimeOut) * time.Millisecond)
 
-		rf.mu.Lock()
-		// log.Printf("%d %d %d", rf.me, electionTimeOut, time.Now().UnixMilli()-rf.lastTime)
-		if electionTimeOut+rf.lastTime <= time.Now().UnixMilli() && rf.state != LEADER {
+		select {
+		case <-rf.heartBeatTimer.C: //leader
+			rf.mu.Lock()
+			go rf.sendHeartBeat()
+			rf.heartBeatTimer.Reset(HEARTSBEATS_INTERVAL)
+			rf.mu.Unlock()
+		case <-rf.electionTimer.C: //follower or candidate
+			rf.mu.Lock()
+			if rf.state == FOLLOWER {
+				rf.switchState(CANDIDATE)
+			}
 			log.Printf("Peer[%d] try to become leader", rf.me)
 			go rf.startElection()
+			rf.mu.Unlock()
 		}
-		rf.mu.Unlock()
 	}
 }
 
@@ -682,12 +677,12 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		nextIndex:         make([]int, len(peers)),
 		matchIndex:        make([]int, len(peers)),
 		state:             FOLLOWER,
-		lastTime:          time.Now().UnixMilli(),
+		electionTimer:     time.NewTimer(getRandTimeout()),
+		heartBeatTimer:    time.NewTimer(TIMEINF),
 		applyCh:           applyCh,
 		appendEntriesCond: *sync.NewCond(&sync.Mutex{}),
 	}
 	rf.log = append(rf.log, Entry{Term: 0})
-
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
