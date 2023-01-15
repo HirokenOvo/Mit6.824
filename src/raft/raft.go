@@ -231,6 +231,9 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  //当前任期，对于领导人而言 它会更新自己的任期
 	Success bool //如果跟随者所含有的条目和 prevLogIndex 以及 prevLogTerm 匹配上了，则为 true
+	XTerm   int  //Follower中与Leader冲突的Log对应的任期号,如果Follower在对应位置没有Log，那么这里会返回 -1
+	XIndex  int  //Follower中，对应任期号为XTerm的第一条Log条目的槽位号
+	XLen    int  //如果Follower在对应位置没有Log，那么XTerm会返回-1，XLen表示空白的Log槽位数。
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
@@ -251,9 +254,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	//2	,3
-	if len(rf.log)-1 < args.PreLogIndex || rf.log[args.PreLogIndex].Term != args.PreLogTerm {
+	//2
+	if len(rf.log)-1 < args.PreLogIndex {
 		reply.Success = false
+		reply.XTerm = -1
+		reply.XLen = args.PreLogIndex - len(rf.log) + 1
+		return
+	}
+	//3
+	if rf.log[args.PreLogIndex].Term != args.PreLogTerm {
+		reply.Success = false
+		reply.XTerm = rf.log[args.PreLogIndex].Term
+		for idx := len(rf.log) - 1; idx >= 1; idx-- {
+			if rf.log[idx].Term == reply.XTerm && rf.log[idx-1].Term != reply.XTerm {
+				reply.XIndex = idx
+				break
+			}
+		}
 		return
 	}
 	//4
@@ -273,44 +290,7 @@ func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *Ap
 	return ok
 }
 
-func (rf *Raft) sendHeatbeat() {
-	// func (rf *Raft) leaderAppendEntries() {
-	rf.mu.Lock()
-	args := AppendEntriesArgs{Term: rf.currentTerm,
-		LeaderId:     rf.me,
-		PreLogIndex:  len(rf.log) - 1,
-		PreLogTerm:   rf.log[len(rf.log)-1].Term,
-		Entries:      make([]Entry, 0),
-		LeaderCommit: rf.commitIndex,
-	}
-	rf.mu.Unlock()
-	for peer := range rf.peers {
-		if peer == rf.me {
-			continue
-		}
-		go func(peer int) {
-			reply := AppendEntriesReply{}
-			ok := rf.sendAppendEntries(peer, &args, &reply)
-			if !ok {
-				// log.Printf("Peer[%d] can't receive leader[%d]'s heartbeat", peer, rf.me)
-				return
-			}
-			// if reply.Success {
-			// 	log.Printf("leader[%d] success transmit heartbeat to Peer[%d]", rf.me, peer)
-			// }
-			rf.mu.Lock()
-			if !reply.Success && reply.Term > rf.currentTerm {
-				rf.currentTerm = reply.Term
-				rf.switchState(FOLLOWER)
-				// log.Printf("find Term bigger then leader[%d],became follower", rf.me)
-			}
-			rf.mu.Unlock()
-		}(peer)
-	}
-}
-
 func (rf *Raft) leaderAppendEntries() {
-	// func (rf *Raft) sendHeatbeat() {
 	for peer := range rf.peers {
 		if peer == rf.me {
 			continue
@@ -373,7 +353,11 @@ func (rf *Raft) leaderAppendEntries() {
 				}
 
 			} else {
-				rf.nextIndex[peer]--
+				if reply.XTerm == -1 {
+					rf.nextIndex[peer] -= reply.XLen
+				} else {
+					rf.nextIndex[peer] = reply.XIndex
+				}
 			}
 		}(peer)
 	}
