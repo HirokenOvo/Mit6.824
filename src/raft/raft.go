@@ -18,7 +18,7 @@ package raft
 //
 
 import (
-	//	"bytes"
+	"bytes"
 	// "fmt"
 	// "log"
 	"math/rand"
@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	//	"6.824/labgob"
+	"6.824/labgob"
 	"6.824/labrpc"
 )
 
@@ -54,11 +54,12 @@ func min(a int, b int) int {
 
 func getRandTimeout() time.Duration {
 	r := rand.New(rand.NewSource(time.Now().UnixMicro()))
-	electionTimeOut := r.Int63()%(600-450) + 450 //随机产生的选举超时时间 450ms<= x <=600ms
+	electionTimeOut := r.Int63()%(800-450) + 450 //随机产生的选举超时时间 450ms<= x <=600ms
 	return time.Duration(electionTimeOut) * time.Millisecond
 }
 
 func (rf *Raft) switchState(state int) {
+	defer rf.persist()
 	if state == rf.state {
 		if state == FOLLOWER {
 			rf.votedFor = -1
@@ -80,7 +81,7 @@ func (rf *Raft) switchState(state int) {
 			rf.nextIndex[peer] = len(rf.log)
 			rf.matchIndex[peer] = 0
 		}
-		// fmt.Println(len(rf.log))
+		DPrintf("peer[%v] become leader,len:%v,currentTerm%v\n", rf.me, len(rf.log), rf.currentTerm)
 	}
 }
 
@@ -165,12 +166,13 @@ func (rf *Raft) GetState() (int, bool) {
 func (rf *Raft) persist() {
 	// Your code here (2C).
 	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -182,17 +184,20 @@ func (rf *Raft) readPersist(data []byte) {
 	}
 	// Your code here (2C).
 	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var xxx int
+	var yyy int
+	var zzz []Entry
+	if d.Decode(&xxx) != nil ||
+		d.Decode(&yyy) != nil ||
+		d.Decode(&zzz) != nil {
+		DPrintf("readPersist error!")
+	} else {
+		rf.currentTerm = xxx
+		rf.votedFor = yyy
+		rf.log = zzz
+	}
 }
 
 //
@@ -229,16 +234,16 @@ type AppendEntriesArgs struct {
 
 //AppendEntries RPC reply structure
 type AppendEntriesReply struct {
-	Term    int  //当前任期，对于领导人而言 它会更新自己的任期
-	Success bool //如果跟随者所含有的条目和 prevLogIndex 以及 prevLogTerm 匹配上了，则为 true
-	XTerm   int  //Follower中与Leader冲突的Log对应的任期号,如果Follower在对应位置没有Log，那么这里会返回 -1
-	XIndex  int  //Follower中，对应任期号为XTerm的第一条Log条目的槽位号
-	XLen    int  //如果Follower在对应位置没有Log，那么XTerm会返回-1，XLen表示空白的Log槽位数。
+	Term          int  //当前任期，对于领导人而言 它会更新自己的任期
+	Success       bool //如果跟随者所含有的条目和 prevLogIndex 以及 prevLogTerm 匹配上了，则为 true
+	ConflictTerm  int  //Follower中与Leader冲突的Log对应的任期号,如果Follower在对应位置没有Log，那么这里会返回 -1
+	ConflictIndex int  //Follower中，对应任期号为XTerm的第一条Log条目的槽位号,XTerm为-1时返回日志总长度
 }
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	defer rf.persist()
 	//1
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
@@ -257,32 +262,49 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	//2
 	if len(rf.log)-1 < args.PreLogIndex {
 		reply.Success = false
-		reply.XTerm = -1
-		reply.XLen = args.PreLogIndex - len(rf.log) + 1
+		reply.ConflictTerm = -1
+		reply.ConflictIndex = len(rf.log)
 		return
 	}
 	//3
 	if rf.log[args.PreLogIndex].Term != args.PreLogTerm {
 		reply.Success = false
-		reply.XTerm = rf.log[args.PreLogIndex].Term
-		for idx := len(rf.log) - 1; idx >= 1; idx-- {
-			if rf.log[idx].Term == reply.XTerm && rf.log[idx-1].Term != reply.XTerm {
-				reply.XIndex = idx
-				break
-			}
+		reply.ConflictTerm = rf.log[args.PreLogIndex].Term
+		reply.ConflictIndex = args.PreLogIndex
+		for reply.ConflictTerm == rf.log[reply.ConflictIndex-1].Term {
+			reply.ConflictIndex--
 		}
+		// for idx := args.PreLogIndex; idx >= 1; idx-- {
+		// 	if rf.log[idx].Term == reply.ConflictTerm && rf.log[idx-1].Term != reply.ConflictTerm {
+		// 		reply.ConflictIndex = idx
+		// 		break
+		// 	}
+		// }
 		return
 	}
 	//4
-	rf.log = append(rf.log[:args.PreLogIndex+1], args.Entries...)
-	// fmt.Println(rf.me, rf.log)
+	// rf.log := append(rf.log[:args.PreLogIndex+1], args.Entries...)错误
+	//可能因为消息延迟导致新的RPC比老的RPC先到达，
+	//若新的RPC日志长度变长，老的RPC会把新的RPC日志给覆盖掉，返回时会把matchIndex变小导致错误
+	//正确做法先找到不匹配位置再覆盖
+
+	conflictIdx := -1
+	for idx := range args.Entries {
+		if len(rf.log)-1 < args.PreLogIndex+idx+1 || rf.log[args.PreLogIndex+idx+1] != args.Entries[idx] {
+			conflictIdx = idx
+			break
+		}
+	}
+
+	if conflictIdx != -1 {
+		rf.log = append(rf.log[:args.PreLogIndex+conflictIdx+1], args.Entries[conflictIdx:]...)
+	}
 
 	//5
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log)-1)
 		rf.updateCommit()
 	}
-
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
@@ -297,6 +319,11 @@ func (rf *Raft) leaderAppendEntries() {
 		}
 		go func(peer int) {
 			rf.mu.Lock()
+			if rf.state != LEADER {
+				rf.mu.Unlock()
+				return
+			}
+			// DPrintf("leader[%v]'s peer[%v],neidx:%v,len:%v\n", rf.me, peer, rf.nextIndex[peer], len(rf.log))
 			args := AppendEntriesArgs{Term: rf.currentTerm,
 				LeaderId:     rf.me,
 				PreLogIndex:  rf.nextIndex[peer] - 1,
@@ -315,11 +342,15 @@ func (rf *Raft) leaderAppendEntries() {
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(peer, &args, &reply)
 			if !ok {
-				// log.Printf("call peer[%d] failed", peer)
+				DPrintf("leader[%v] call peer[%d] failed", rf.me, peer)
 				return
 			}
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
+
+			if rf.state != LEADER || rf.currentTerm != args.Term || rf.nextIndex[peer]-1 != args.PreLogIndex { //防止在发送到接受过程中领导者和任期已经发生了变化，会导致接下来程序有误
+				return
+			}
 
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
@@ -336,7 +367,7 @@ func (rf *Raft) leaderAppendEntries() {
 				//假设存在 N 满足N > commitIndex ，
 				//使得大多数的 matchIndex[i] ≥ N 以及log[N].term ==currentTerm 成立，则令 commitIndex = N
 				for N := len(rf.log) - 1; N > rf.commitIndex; N-- {
-					if rf.log[N].Term != rf.currentTerm {
+					if rf.log[N].Term != rf.currentTerm { //leader 只能提交当前 term 的日志，不能提交旧 term 的日志
 						break
 					}
 					cnt := 0
@@ -353,10 +384,17 @@ func (rf *Raft) leaderAppendEntries() {
 				}
 
 			} else {
-				if reply.XTerm == -1 {
-					rf.nextIndex[peer] -= reply.XLen
-				} else {
-					rf.nextIndex[peer] = reply.XIndex
+				rf.nextIndex[peer] = reply.ConflictIndex
+				if reply.ConflictTerm != -1 {
+					for idx := rf.nextIndex[peer]; idx > 0; idx-- {
+						if rf.log[idx].Term != reply.ConflictTerm && rf.log[idx-1].Term == reply.ConflictTerm {
+							rf.nextIndex[peer] = idx
+							break
+						}
+						if rf.log[idx].Term < reply.ConflictTerm {
+							break
+						}
+					}
 				}
 			}
 		}(peer)
@@ -378,7 +416,7 @@ func (rf *Raft) updateCommit() {
 			rf.lastApplied = max(rf.lastApplied, msg.CommandIndex)
 			// fmt.Printf("peer[%v] update commitIndex [%v]->[%v] logsLen:[%v] lastApplied[%v]\n", rf.me, rf.commitIndex, base+idx+1, len(rf.log), rf.lastApplied)
 
-			// log.Printf("Peer[%d] success commit log[%d] to client", rf.me, base+idx+1)
+			DPrintf("Peer[%d] success commit log[%d] to client", rf.me, base+idx+1)
 		}
 
 	}
@@ -439,6 +477,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			reply.VoteGranted = true
 		}
 	}
+	rf.persist()
 
 }
 
@@ -480,11 +519,13 @@ func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
+	DPrintf("Peer[%d] try to become leader,votefor:%v,currentTerm:%v\n", rf.me, rf.votedFor, rf.currentTerm)
 	rf.electionTimer.Reset(getRandTimeout())
 	args := RequestVoteArgs{Term: rf.currentTerm,
 		CandidateID:  rf.me,
 		LastLogIndex: len(rf.log) - 1,
 		LastLogTerm:  rf.log[len(rf.log)-1].Term}
+	rf.persist()
 	rf.mu.Unlock()
 
 	cond := sync.NewCond(&sync.Mutex{})
@@ -496,23 +537,37 @@ func (rf *Raft) startElection() {
 			continue
 		}
 		go func(peer int) {
+			rf.mu.Lock()
+			if rf.state != CANDIDATE {
+				rf.mu.Unlock()
+				cond.Broadcast()
+				return
+			}
+			rf.mu.Unlock()
+
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(peer, &args, &reply)
 			if !ok {
-				// log.Printf("peer[%d] call peer[%d] failed", rf.me, peer)
+				DPrintf("peer[%d] call peer[%d] failed", rf.me, peer)
 				return
 			}
-
+			rf.mu.Lock()
+			if rf.state != CANDIDATE || rf.currentTerm != args.Term {
+				rf.mu.Unlock()
+				cond.Broadcast()
+				return
+			}
+			rf.mu.Unlock()
 			cond.L.Lock()
 			if reply.VoteGranted {
-				// log.Printf("Peer[%d] voted Peer[%d]", peer, rf.me)
+				DPrintf("Peer[%d] voted Peer[%d]", peer, rf.me)
 				cnt++
 			} else {
 				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
-					rf.switchState(FOLLOWER)
 					rf.currentTerm = reply.Term
-					// log.Printf("find Term bigger then Peer[%d],failed to become leader", rf.me)
+					rf.switchState(FOLLOWER)
+					DPrintf("find Term bigger then Peer[%d],failed to become leader", rf.me)
 				}
 				rf.mu.Unlock()
 			}
@@ -536,10 +591,10 @@ func (rf *Raft) startElection() {
 	rf.mu.Lock()
 	if cnt*2 >= len(rf.peers) && rf.state == CANDIDATE {
 		rf.switchState(LEADER)
-		// log.Printf("Peer[%d] become new leader", rf.me)
+		// DPrintf("Peer[%d] become new leader", rf.me)
 		rf.heartBeatTimer.Reset(10 * time.Millisecond)
 	} else {
-		// log.Printf("Peer[%d] failed to become leader", rf.me)
+		DPrintf("Peer[%d] failed to become leader", rf.me)
 	}
 	rf.mu.Unlock()
 
@@ -568,9 +623,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := rf.state == LEADER
 	if isLeader {
 		rf.log = append(rf.log, Entry{Command: command, Term: rf.currentTerm})
-		rf.nextIndex[rf.me]++
+		rf.nextIndex[rf.me] = len(rf.log)
 		rf.matchIndex[rf.me] = len(rf.log) - 1
 		rf.heartBeatTimer.Reset(time.Millisecond * 10)
+		rf.persist()
 		// log.Printf("add new log %d to leader[%d]'s log[%d]", command, rf.me, index)
 	}
 	rf.mu.Unlock()
@@ -619,7 +675,7 @@ func (rf *Raft) ticker() {
 			if rf.state == FOLLOWER {
 				rf.switchState(CANDIDATE)
 			}
-			// log.Printf("Peer[%d] try to become leader", rf.me)
+			// DPrintf("Peer[%d] try to become leader", rf.me)
 			go rf.startElection()
 			rf.mu.Unlock()
 		}
