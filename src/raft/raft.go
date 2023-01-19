@@ -66,6 +66,9 @@ func (rf *Raft) switchState(state int) {
 	// 	}
 	// 	return
 	// }
+
+	//任期改变转换角色，votefor只有任期改变才初始化，保证一个任期只投一票
+
 	rf.state = state
 	switch state {
 	case FOLLOWER:
@@ -128,22 +131,24 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
-	//persistent state on all servers
+	//单调递增的属性用max来保证
+
+	//所有服务器上的持久性状态
 	currentTerm int     //服务器已知最新的任期（在服务器首次启动时初始化为0，单调递增）
 	votedFor    int     //当前任期内收到选票的 candidateId，如果没有投给任何候选人 则为空
 	log         []Entry //日志条目；每个条目包含了用于状态机的命令，以及领导人接收到该条目时的任期（初始索引为1）
-	//volatile state on all servers
+	snapshot    Snapshot
+	//所有服务器上的易失性状态
 	commitIndex   int         //已知已提交的最高的日志条目的索引（初始值为0，单调递增）
 	lastApplied   int         //已经被应用到状态机的最高的日志条目的索引（初始值为0，单调递增）
 	state         int         //当前服务器的状态（follower,leader,candidate）
 	electionTimer *time.Timer //选举超时定时器
-	//volatile state on leaders
+	//领导人（服务器）上的易失性状态
 	heartBeatTimer *time.Timer //发送心跳的定时器
 	nextIndex      []int       //对于每一台服务器，发送到该服务器的下一个日志条目的索引（初始值为领导人最后的日志条目的索引+1）
 	matchIndex     []int       //对于每一台服务器，已知的已经复制到该服务器的最高日志条目的索引（初始值为0，单调递增）
 
-	applyCh  chan ApplyMsg
-	snapshot Snapshot
+	applyCh chan ApplyMsg
 }
 
 // return currentTerm and whether this server
@@ -329,6 +334,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
+	//快照点还未提交或已经快照过则无需快照
 	if index > rf.commitIndex || index <= rf.snapshot.LastIncludedIndex {
 		return
 	}
@@ -353,7 +359,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), snapshot)
 }
 
-//0作为哨兵不删一直保留
+//0作为哨兵不删一直保留，快照中只有[1,rf.snapshot.LastIncludeIndex]
 func (rf *Raft) getFakeLen() int { //不含快照 含0的总长度
 	return len(rf.log)
 }
@@ -432,7 +438,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	}
 	//3
 	preLogIndex := rf.real2Fake(args.PreLogIndex)
-	if rf.log[preLogIndex].Term != args.PreLogTerm { //找到第一个和冲突日期相同的位置
+	if preLogIndex > 0 && rf.log[preLogIndex].Term != args.PreLogTerm { //找到第一个和冲突日期相同的位置
 		reply.Success = false
 		reply.ConflictTerm = rf.log[preLogIndex].Term
 		reply.ConflictIndex = preLogIndex
@@ -440,7 +446,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			reply.ConflictIndex--
 		}
 		return
-	} //preLogIndex<0说明已经生成快照了，则一定匹配了
+	} //preLogIndex<=0说明已经生成快照了，则一定匹配了
 	//4
 	// rf.log := append(rf.log[:args.PreLogIndex+1], args.Entries...)错误
 	//可能因为消息延迟导致新的RPC比老的RPC先到达，
@@ -481,27 +487,46 @@ func (rf *Raft) leaderAppendEntries() {
 		if peer == rf.me {
 			continue
 		}
+		/*
+			发送RPC前检查还是否为leader
+			发送RPC后检查发送和接受RPC期间leader状态是否发生改变
+		*/
 		go func(peer int) {
 			rf.mu.Lock()
 			if rf.state != LEADER {
 				rf.mu.Unlock()
 				return
 			}
+			/*
+				1.	args.PreLogIndex < rf.snapshot.LastIncludedIndex
+				-> 	rf.nextIndex[peer] <= rf.snapshot.LastIncludedIndex
+				->	log已经删除，则直接发送快照
 
-			if rf.nextIndex[peer]-1 < rf.snapshot.LastIncludedIndex && rf.snapshot.LastIncludedIndex != 0 { //log已经删除了，直接复制快照
-				// DPrintf("neidx-1:%v,lastIdx:%v\n", rf.nextIndex[peer]-1, rf.snapshot.LastIncludedIndex)
+				2.	args.PreLogIndex >= rf.snapshot.LastIncludedIndex
+				->	rf.nextIndex[peer] > rf.snapshot.LastIncludedIndex
+				->	log未删除,发送附加日志
+			*/
+			if rf.nextIndex[peer]-1 < rf.snapshot.LastIncludedIndex {
 				go rf.SendInstallSnapshotEntries(peer)
 				rf.mu.Unlock()
 				return
 			}
 
-			// DPrintf("leader[%v]'s peer[%v],neidx:%v,len:%v\n", rf.me, peer, rf.nextIndex[peer], len(rf.log))
 			args := AppendEntriesArgs{Term: rf.currentTerm,
 				LeaderId:     rf.me,
 				PreLogIndex:  rf.nextIndex[peer] - 1,
 				PreLogTerm:   rf.log[rf.real2Fake(rf.nextIndex[peer]-1)].Term,
 				LeaderCommit: rf.commitIndex,
 			}
+
+			if args.PreLogTerm == 0 {
+				args.PreLogTerm = rf.snapshot.LastIncludedTerm
+			}
+
+			/*
+				1.	rf.nextIndex[rf.me] = rf.nextIndex[peer] : 发送心跳
+				2.	rf.nextIndex[rf.me] > rf.nextIndex[peer] : 发送附加条目
+			*/
 			args.Entries = make([]Entry, rf.nextIndex[rf.me]-rf.nextIndex[peer])
 			copy(args.Entries, rf.log[rf.real2Fake(rf.nextIndex[peer]):rf.real2Fake(rf.nextIndex[rf.me])])
 
@@ -515,7 +540,7 @@ func (rf *Raft) leaderAppendEntries() {
 			rf.mu.Lock()
 			defer rf.mu.Unlock()
 
-			if rf.state != LEADER || rf.currentTerm != args.Term || rf.nextIndex[peer]-1 != args.PreLogIndex { //防止在发送到接受过程中领导者和任期已经发生了变化，会导致接下来程序有误
+			if rf.state != LEADER || rf.currentTerm != args.Term || rf.nextIndex[peer]-1 != args.PreLogIndex {
 				return
 			}
 
@@ -529,10 +554,12 @@ func (rf *Raft) leaderAppendEntries() {
 				if rf.nextIndex[peer] != rf.nextIndex[rf.me] {
 					// log.Printf("Peer[%d] success copy log[%d:%d] from leader[%d]", peer, rf.nextIndex[peer], rf.nextIndex[rf.me]-1, rf.me)
 				}
-				rf.nextIndex[peer] = args.PreLogIndex + len(args.Entries) + 1
-				rf.matchIndex[peer] = args.PreLogIndex + len(args.Entries)
-				//假设存在 N 满足N > commitIndex ，
-				//使得大多数的 matchIndex[i] ≥ N 以及log[N].term ==currentTerm 成立，则令 commitIndex = N
+				rf.nextIndex[peer] = max(rf.nextIndex[peer], args.PreLogIndex+len(args.Entries)+1)
+				rf.matchIndex[peer] = max(rf.matchIndex[peer], args.PreLogIndex+len(args.Entries))
+				/*
+					假设存在 N 满足N > commitIndex
+					使得大多数的 matchIndex[i] ≥ N 以及log[N].term ==currentTerm 成立，则令 commitIndex = N
+				*/
 				for N := rf.getFakeLastIdx(); N > max(0, rf.real2Fake(rf.commitIndex)); N-- {
 					if rf.log[N].Term != rf.currentTerm { //leader 只能提交当前 term 的日志，不能提交旧 term 的日志
 						break
@@ -544,7 +571,7 @@ func (rf *Raft) leaderAppendEntries() {
 						}
 					}
 					if 2*cnt >= len(rf.peers) {
-						rf.commitIndex = rf.fake2Real(N)
+						rf.commitIndex = max(rf.commitIndex, rf.fake2Real(N))
 						rf.updateCommit()
 						break
 					}
@@ -553,6 +580,7 @@ func (rf *Raft) leaderAppendEntries() {
 			} else {
 				rf.nextIndex[peer] = reply.ConflictIndex
 				if reply.ConflictTerm != -1 {
+					//找到leader日志中和conflictTerm相同的最后一条日志
 					for idx := rf.real2Fake(rf.nextIndex[peer]); idx > 0; idx-- {
 						if rf.log[idx].Term != reply.ConflictTerm && rf.log[idx-1].Term == reply.ConflictTerm {
 							rf.nextIndex[peer] = rf.fake2Real(idx)
@@ -889,7 +917,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 		electionTimer:  time.NewTimer(getRandTimeout()),
 		heartBeatTimer: time.NewTimer(TIMEINF),
 		applyCh:        applyCh,
-		snapshot:       Snapshot{LastIncludedIndex: 0},
+		snapshot:       Snapshot{LastIncludedIndex: 0, LastIncludedTerm: 0},
 	}
 	rf.log = append(rf.log, Entry{Term: 0})
 	// Your initialization code here (2A, 2B, 2C).
