@@ -54,7 +54,7 @@ func min(a int, b int) int {
 
 func getRandTimeout() time.Duration {
 	r := rand.New(rand.NewSource(time.Now().UnixMicro()))
-	electionTimeOut := r.Int63()%(800-450) + 450 //随机产生的选举超时时间 450ms<= x<=800ms
+	electionTimeOut := r.Int63()%(600-450) + 450 //随机产生的选举超时时间 450ms<= x<=800ms
 	return time.Duration(electionTimeOut) * time.Millisecond
 }
 
@@ -414,13 +414,12 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	defer rf.persist()
-	//1
+	//1 如果领导人的任期小于接收者的当前任期,返回假
 	if rf.currentTerm > args.Term {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
-
 	rf.electionTimer.Reset(getRandTimeout())
 	if rf.currentTerm < args.Term {
 		rf.currentTerm = args.Term
@@ -429,14 +428,21 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	reply.Term = rf.currentTerm
 	reply.Success = true
-	//2
+	/*	2
+		If a follower does not have prevLogIndex in its log,
+		it should return with conflictIndex = len(log) and conflictTerm = None.
+	*/
 	if rf.getRealLastIdx() < args.PreLogIndex {
 		reply.Success = false
 		reply.ConflictTerm = -1
 		reply.ConflictIndex = rf.getRealLastIdx() + 1
 		return
 	}
-	//3
+	/*	3
+		If a follower does have prevLogIndex in its log, but the term does not match,
+		it should return conflictTerm = log[prevLogIndex].Term,
+		and then search its log for the first index whose entry has term equal to conflictTerm.
+	*/
 	preLogIndex := rf.real2Fake(args.PreLogIndex)
 	if preLogIndex > 0 && rf.log[preLogIndex].Term != args.PreLogTerm { //找到第一个和冲突日期相同的位置
 		reply.Success = false
@@ -447,12 +453,15 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 		return
 	} //preLogIndex<=0说明已经生成快照了，则一定匹配了
-	//4
-	// rf.log := append(rf.log[:args.PreLogIndex+1], args.Entries...)错误
-	//可能因为消息延迟导致新的RPC比老的RPC先到达，
-	//若新的RPC日志长度变长，老的RPC会把新的RPC日志给覆盖掉，返回时会把matchIndex变小导致错误
-	//正确做法先找到不匹配位置再覆盖
 
+	/*	4
+		删除冲突的条目以及它之后的所有条目，追加日志中尚未存在的任何新条目
+		-----------------------------------------------------------------
+		rf.log := append(rf.log[:args.PreLogIndex+1], args.Entries...)错误
+		可能因为消息延迟导致新的RPC比老的RPC先到达，
+		若新的RPC日志长度变长，老的RPC会把新的RPC日志给覆盖掉，返回时会把matchIndex变小导致错误
+		正确做法先找到不匹配位置再覆盖
+	*/
 	conflictIdx := -1
 	for idx := range args.Entries {
 		if preLogIndex+idx+1 < 0 {
@@ -470,7 +479,9 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		rf.log = append(tmplog, args.Entries[conflictIdx:]...)
 	}
 
-	//5
+	/*	5
+		If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+	*/
 	if args.LeaderCommit > rf.commitIndex {
 		rf.commitIndex = min(args.LeaderCommit, rf.getRealLastIdx())
 		rf.updateCommit()
@@ -534,7 +545,7 @@ func (rf *Raft) leaderAppendEntries() {
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(peer, &args, &reply)
 			if !ok {
-				DPrintf("leader[%v] call peer[%d] failed", rf.me, peer)
+				DPrintf("leaderAppendEntries : leader[%v] call peer[%d] failed", rf.me, peer)
 				return
 			}
 			rf.mu.Lock()
@@ -554,6 +565,7 @@ func (rf *Raft) leaderAppendEntries() {
 				if rf.nextIndex[peer] != rf.nextIndex[rf.me] {
 					// log.Printf("Peer[%d] success copy log[%d:%d] from leader[%d]", peer, rf.nextIndex[peer], rf.nextIndex[rf.me]-1, rf.me)
 				}
+				DPrintf("leader[%v]'s matchIdx[%v]: %v -> %v\n", rf.me, peer, rf.matchIndex[peer], max(rf.matchIndex[peer], args.PreLogIndex+len(args.Entries)))
 				rf.nextIndex[peer] = max(rf.nextIndex[peer], args.PreLogIndex+len(args.Entries)+1)
 				rf.matchIndex[peer] = max(rf.matchIndex[peer], args.PreLogIndex+len(args.Entries))
 				/*
@@ -677,6 +689,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if lastLogTerm < args.LastLogTerm || (lastLogTerm == args.LastLogTerm && rf.getRealLastIdx() <= args.LastLogIndex) {
 			rf.switchState(FOLLOWER)
 			rf.votedFor = args.CandidateID
+			//reset election timer when you grant a vote to another peer.
+			//this case is especially important in unreliable networks where it is likely that followers have different logs;
 			rf.electionTimer.Reset(getRandTimeout())
 			reply.VoteGranted = true
 		}
@@ -720,7 +734,6 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 }
 
 func (rf *Raft) startElection() {
-	rf.mu.Lock()
 	rf.currentTerm++
 	rf.votedFor = rf.me
 	DPrintf("Peer[%d] try to become leader,votefor:%v,currentTerm:%v\n", rf.me, rf.votedFor, rf.currentTerm)
@@ -733,11 +746,9 @@ func (rf *Raft) startElection() {
 		args.LastLogTerm = rf.snapshot.LastIncludedTerm
 	}
 	rf.persist()
-	rf.mu.Unlock()
 
-	cond := sync.NewCond(&sync.Mutex{})
-	cnt := 1      //接收到选票数
-	finished := 1 //接收到总响应数
+	mu := sync.Mutex{}
+	cnt := 1 //接收到选票数
 
 	for peer := range rf.peers {
 		if peer == rf.me {
@@ -747,7 +758,6 @@ func (rf *Raft) startElection() {
 			rf.mu.Lock()
 			if rf.state != CANDIDATE {
 				rf.mu.Unlock()
-				cond.Broadcast()
 				return
 			}
 			rf.mu.Unlock()
@@ -755,56 +765,34 @@ func (rf *Raft) startElection() {
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(peer, &args, &reply)
 			if !ok {
-				DPrintf("peer[%d] call peer[%d] failed", rf.me, peer)
+				DPrintf("startElection : peer[%d] call peer[%d] failed", rf.me, peer)
 				return
 			}
 			rf.mu.Lock()
+			defer rf.mu.Unlock()
 			if rf.state != CANDIDATE || rf.currentTerm != args.Term {
-				rf.mu.Unlock()
-				cond.Broadcast()
 				return
 			}
-			rf.mu.Unlock()
-			cond.L.Lock()
+
 			if reply.VoteGranted {
 				DPrintf("Peer[%d] voted Peer[%d]", peer, rf.me)
+				mu.Lock()
 				cnt++
+				if cnt*2 >= len(rf.peers) && rf.state == CANDIDATE {
+					rf.switchState(LEADER)
+					rf.heartBeatTimer.Reset(10 * time.Millisecond)
+				}
+				mu.Unlock()
 			} else {
-				rf.mu.Lock()
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.switchState(FOLLOWER)
 					DPrintf("find Term bigger then Peer[%d],failed to become leader", rf.me)
 				}
-				rf.mu.Unlock()
 			}
-			finished++
-			cond.L.Unlock()
-			cond.Broadcast()
+
 		}(peer)
 	}
-
-	cond.L.Lock()
-	defer cond.L.Unlock()
-	for finished != len(rf.peers) && cnt*2 < len(rf.peers) {
-		rf.mu.Lock()
-		if rf.state != CANDIDATE {
-			rf.mu.Unlock()
-			break
-		}
-		rf.mu.Unlock()
-		cond.Wait()
-	}
-	rf.mu.Lock()
-	if cnt*2 >= len(rf.peers) && rf.state == CANDIDATE {
-		rf.switchState(LEADER)
-		// DPrintf("Peer[%d] become new leader", rf.me)
-		rf.heartBeatTimer.Reset(10 * time.Millisecond)
-	} else {
-		DPrintf("Peer[%d] failed to become leader", rf.me)
-	}
-	rf.mu.Unlock()
-
 }
 
 //
@@ -870,10 +858,11 @@ func (rf *Raft) ticker() {
 		// be started and to randomize sleeping time using
 		// time.Sleep().
 
+		//rf.leaderAppendEntries()和rf.startElection()不能协程，不然会有奇怪的选举bug
 		select {
 		case <-rf.heartBeatTimer.C: //leader
 			rf.mu.Lock()
-			go rf.leaderAppendEntries()
+			rf.leaderAppendEntries()
 			rf.heartBeatTimer.Reset(HEARTSBEATS_INTERVAL)
 			rf.mu.Unlock()
 
@@ -882,10 +871,10 @@ func (rf *Raft) ticker() {
 			if rf.state == FOLLOWER {
 				rf.switchState(CANDIDATE)
 			}
-			// DPrintf("Peer[%d] try to become leader", rf.me)
-			go rf.startElection()
+			rf.startElection()
 			rf.mu.Unlock()
 		}
+
 	}
 }
 
@@ -902,6 +891,7 @@ func (rf *Raft) ticker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
+	DPrintf("peer[%v] start", me)
 	rf := &Raft{
 		peers:          peers,
 		persister:      persister,
