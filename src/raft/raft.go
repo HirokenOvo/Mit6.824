@@ -19,8 +19,6 @@ package raft
 
 import (
 	"bytes"
-	// "fmt"
-	// "log"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -38,34 +36,21 @@ const (
 	TIMEINF              time.Duration = time.Duration(100000) * time.Hour
 )
 
-func max(a int, b int) int {
-	if a >= b {
-		return a
-	}
-	return b
-}
-
-func min(a int, b int) int {
-	if a <= b {
-		return a
-	}
-	return b
-}
-
 func getRandTimeout() time.Duration {
 	r := rand.New(rand.NewSource(time.Now().UnixMicro()))
-	electionTimeOut := r.Int63()%(600-450) + 450 //随机产生的选举超时时间 450ms<= x<=800ms
+	electionTimeOut := r.Int63()%(600-450) + 450 //随机产生的选举超时时间 450ms<= x<=600ms
 	return time.Duration(electionTimeOut) * time.Millisecond
 }
 
 func (rf *Raft) switchState(state int) {
 	defer rf.persist()
-	// if state == rf.state {
-	// 	if state == FOLLOWER {
-	// 		rf.votedFor = -1
-	// 	}
-	// 	return
-	// }
+	//不加这段会有bug，原因未知，猜测计时器奇怪的原因
+	if state == rf.state {
+		if state == FOLLOWER {
+			rf.votedFor = -1
+		}
+		return
+	}
 
 	//任期改变转换角色，votefor只有任期改变才初始化，保证一个任期只投一票
 
@@ -293,11 +278,11 @@ func (rf *Raft) SendInstallSnapshotEntries(peer int) {
 	reply := InstallSnapshotReply{}
 	ok := rf.InstallSnapshotEntries(peer, &args, &reply)
 	if !ok {
-		DPrintf("leader[%v] call peer[%d] failed while sending Snapshot\n", rf.me, peer)
+		// DPrintf("leader[%v] call peer[%d] failed while sending Snapshot\n", rf.me, peer)
 	}
 
 	rf.mu.Lock()
-	DPrintf("leader[%v] deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
+	// DPrintf("leader[%v] deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
 	defer rf.mu.Unlock()
 
 	if rf.state != LEADER || rf.currentTerm != args.Term || rf.snapshot.LastIncludedIndex != args.LastIncludedIndex {
@@ -338,7 +323,7 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	if index > rf.commitIndex || index <= rf.snapshot.LastIncludedIndex {
 		return
 	}
-	DPrintf("peer[%v] Snapshot ,range->%v\n", rf.me, index)
+	// DPrintf("peer[%v] Snapshot ,range->%v\n", rf.me, index)
 	//index是realIdx,需转换
 	idx := rf.real2Fake(index)
 	rf.snapshot.LastIncludedIndex = index
@@ -545,7 +530,7 @@ func (rf *Raft) leaderAppendEntries() {
 			reply := AppendEntriesReply{}
 			ok := rf.sendAppendEntries(peer, &args, &reply)
 			if !ok {
-				DPrintf("leaderAppendEntries : leader[%v] call peer[%d] failed", rf.me, peer)
+				// DPrintf("leaderAppendEntries : leader[%v] call peer[%d] failed", rf.me, peer)
 				return
 			}
 			rf.mu.Lock()
@@ -565,7 +550,7 @@ func (rf *Raft) leaderAppendEntries() {
 				if rf.nextIndex[peer] != rf.nextIndex[rf.me] {
 					// log.Printf("Peer[%d] success copy log[%d:%d] from leader[%d]", peer, rf.nextIndex[peer], rf.nextIndex[rf.me]-1, rf.me)
 				}
-				DPrintf("leader[%v]'s matchIdx[%v]: %v -> %v\n", rf.me, peer, rf.matchIndex[peer], max(rf.matchIndex[peer], args.PreLogIndex+len(args.Entries)))
+				// DPrintf("leader[%v]'s matchIdx[%v]: %v -> %v\n", rf.me, peer, rf.matchIndex[peer], max(rf.matchIndex[peer], args.PreLogIndex+len(args.Entries)))
 				rf.nextIndex[peer] = max(rf.nextIndex[peer], args.PreLogIndex+len(args.Entries)+1)
 				rf.matchIndex[peer] = max(rf.matchIndex[peer], args.PreLogIndex+len(args.Entries))
 				/*
@@ -616,7 +601,7 @@ func (rf *Raft) updateCommit() {
 		base := rf.real2Fake(lastApplied)
 		entries := make([]Entry, rf.real2Fake(rf.commitIndex+1)-(base+1))
 		copy(entries, rf.log[base+1:rf.real2Fake(rf.commitIndex+1)])
-		DPrintf("Peer[%d] start commit to client,range[%v,%v]\n", rf.me, lastApplied, rf.commitIndex)
+		// DPrintf("Peer[%d] start commit to client,range[%v,%v]\n", rf.me, lastApplied, rf.commitIndex)
 		go func() {
 			for idx, entry := range entries {
 				msg := ApplyMsg{CommandValid: true,
@@ -628,7 +613,7 @@ func (rf *Raft) updateCommit() {
 				rf.mu.Lock()
 				rf.lastApplied = max(rf.lastApplied, msg.CommandIndex)
 				rf.mu.Unlock()
-				DPrintf("Peer[%d] success commit log[%d] %v to client", rf.me, lastApplied+idx+1, msg.Command)
+				// DPrintf("Peer[%d] success commit log[%d] %v to client", rf.me, lastApplied+idx+1, msg.Command)
 			}
 		}()
 
@@ -765,7 +750,7 @@ func (rf *Raft) startElection() {
 			reply := RequestVoteReply{}
 			ok := rf.sendRequestVote(peer, &args, &reply)
 			if !ok {
-				DPrintf("startElection : peer[%d] call peer[%d] failed", rf.me, peer)
+				// DPrintf("startElection : peer[%d] call peer[%d] failed", rf.me, peer)
 				return
 			}
 			rf.mu.Lock()
@@ -775,7 +760,7 @@ func (rf *Raft) startElection() {
 			}
 
 			if reply.VoteGranted {
-				DPrintf("Peer[%d] voted Peer[%d]", peer, rf.me)
+				// DPrintf("Peer[%d] voted Peer[%d]", peer, rf.me)
 				mu.Lock()
 				cnt++
 				if cnt*2 >= len(rf.peers) && rf.state == CANDIDATE {
@@ -787,7 +772,7 @@ func (rf *Raft) startElection() {
 				if reply.Term > rf.currentTerm {
 					rf.currentTerm = reply.Term
 					rf.switchState(FOLLOWER)
-					DPrintf("find Term bigger then Peer[%d],failed to become leader", rf.me)
+					// DPrintf("find Term bigger then Peer[%d],failed to become leader", rf.me)
 				}
 			}
 
@@ -822,7 +807,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		rf.matchIndex[rf.me] = rf.getRealLastIdx()
 		rf.heartBeatTimer.Reset(time.Millisecond * 10)
 		rf.persist()
-		DPrintf("add new log %d to leader[%d]'s log[%d],nextIndex:%v\n", command, rf.me, index, rf.nextIndex[rf.me])
+		// DPrintf("add new log %d to leader[%d]'s log[%d],nextIndex:%v\n", command, rf.me, index, rf.nextIndex[rf.me])
 	}
 	rf.mu.Unlock()
 
@@ -891,7 +876,7 @@ func (rf *Raft) ticker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	DPrintf("peer[%v] start", me)
+	// DPrintf("peer[%v] start", me)
 	rf := &Raft{
 		peers:          peers,
 		persister:      persister,

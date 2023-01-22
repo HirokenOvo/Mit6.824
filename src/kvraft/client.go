@@ -1,13 +1,18 @@
 package kvraft
 
-import "6.824/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"math/big"
 
+	"6.824/labrpc"
+)
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId    int64 //该客户端的唯一标识符
+	commandId  int   //该客户端的命令唯一标识符
+	leaderHint int   //记录访问过的leader
 }
 
 func nrand() int64 {
@@ -18,9 +23,12 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
 	// You'll have to add code here.
+	ck := &Clerk{servers: servers,
+		clerkId:    nrand(),
+		commandId:  0,
+		leaderHint: 0, //初始0,不对再重试
+	}
 	return ck
 }
 
@@ -37,9 +45,42 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 // arguments. and reply must be passed as a pointer.
 //
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	args := GetArgs{Key: key,
+		ClerkId:   ck.clerkId,
+		CommandId: ck.commandId,
+	}
+	reply := GetReply{}
+	/*
+		[Duplicate detection]
+		give each client a unique identifier,
+		and then have them tag each request
+		with a monotonically increasing sequence number.
+	*/
+	ck.commandId++
+
+	for {
+		/*
+			[Duplicate detection]
+			If a client re-sends a request,
+			it re-uses the same sequence number.
+		*/
+		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
+		reply = GetReply{}
+		DPrintf("Get:client[%d] start call kvserver[%v],commandId:%v", ck.clerkId, ck.leaderHint, args.CommandId)
+		ok := ck.servers[ck.leaderHint].Call("KVServer.Get", &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader {
+			continue
+		}
+		if reply.Err == ErrNoKey {
+			reply.Value = ""
+		}
+		// DPrintf("Get:client[%d] find Leader:%v,wait response", ck.clerkId, ck.leaderHint)
+		break
+
+	}
+
+	return reply.Value
 }
 
 //
@@ -54,6 +95,28 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	args := PutAppendArgs{Key: key,
+		Value:     value,
+		Op:        op,
+		ClerkId:   ck.clerkId,
+		CommandId: ck.commandId,
+	}
+	reply := PutAppendReply{}
+	ck.commandId++
+
+	for {
+		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
+		reply = PutAppendReply{}
+
+		DPrintf("PutAppend:client[%d] start call kvserver[%v],commandId:%v", ck.clerkId, ck.leaderHint, args.CommandId)
+		ok := ck.servers[ck.leaderHint].Call("KVServer.PutAppend", &args, &reply)
+		if !ok || reply.Err == ErrWrongLeader {
+			continue
+		}
+		// DPrintf("PutAppend:client[%d] find Leader:%v,wait response", ck.clerkId, ck.leaderHint)
+		break
+
+	}
 }
 
 func (ck *Clerk) Put(key string, value string) {
