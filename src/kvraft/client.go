@@ -3,6 +3,8 @@ package kvraft
 import (
 	"crypto/rand"
 	"math/big"
+	"sync"
+	"time"
 
 	"6.824/labrpc"
 )
@@ -13,6 +15,12 @@ type Clerk struct {
 	clerkId    int64 //该客户端的唯一标识符
 	commandId  int   //该客户端的命令唯一标识符
 	leaderHint int   //记录访问过的leader
+	mu         sync.Mutex
+}
+
+type node struct {
+	ok    bool
+	reply interface{}
 }
 
 func nrand() int64 {
@@ -46,11 +54,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 //
 func (ck *Clerk) Get(key string) string {
 	// You will have to modify this function.
+	ck.mu.Lock()
 	args := GetArgs{Key: key,
 		ClerkId:   ck.clerkId,
 		CommandId: ck.commandId,
 	}
-	reply := GetReply{}
 	/*
 		[Duplicate detection]
 		give each client a unique identifier,
@@ -58,29 +66,42 @@ func (ck *Clerk) Get(key string) string {
 		with a monotonically increasing sequence number.
 	*/
 	ck.commandId++
-
+	ck.mu.Unlock()
+	resultChan := make(chan node)
 	for {
 		/*
 			[Duplicate detection]
 			If a client re-sends a request,
 			it re-uses the same sequence number.
 		*/
+		ck.mu.Lock()
 		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
-		reply = GetReply{}
+		tar := ck.leaderHint
+		ck.mu.Unlock()
 		DPrintf("Get:client[%d] start call kvserver[%v],commandId:%v", ck.clerkId, ck.leaderHint, args.CommandId)
-		ok := ck.servers[ck.leaderHint].Call("KVServer.Get", &args, &reply)
-		if !ok || reply.Err == ErrWrongLeader {
+		go func() {
+			reply := GetReply{}
+			ok := ck.servers[tar].Call("KVServer.Get", &args, &reply)
+			resultChan <- node{ok, reply}
+
+		}()
+		select {
+		case receive := <-resultChan:
+			ok, reply := receive.ok, receive.reply.(GetReply)
+			if !ok || reply.Err == ErrWrongLeader {
+				continue
+			}
+			DPrintf("Get:client[%d] find Leader:%v,commandId%v,receive response", ck.clerkId, ck.leaderHint, args.CommandId)
+			if reply.Err == ErrNoKey {
+				reply.Value = ""
+			}
+			return reply.Value
+		case <-time.After(time.Second):
 			continue
 		}
-		if reply.Err == ErrNoKey {
-			reply.Value = ""
-		}
-		// DPrintf("Get:client[%d] find Leader:%v,wait response", ck.clerkId, ck.leaderHint)
-		break
 
 	}
 
-	return reply.Value
 }
 
 //
@@ -95,27 +116,39 @@ func (ck *Clerk) Get(key string) string {
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
 	// You will have to modify this function.
+	ck.mu.Lock()
 	args := PutAppendArgs{Key: key,
 		Value:     value,
 		Op:        op,
 		ClerkId:   ck.clerkId,
 		CommandId: ck.commandId,
 	}
-	reply := PutAppendReply{}
 	ck.commandId++
-
+	ck.mu.Unlock()
+	resultChan := make(chan node)
 	for {
+		ck.mu.Lock()
 		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
-		reply = PutAppendReply{}
-
+		tar := ck.leaderHint
+		ck.mu.Unlock()
 		DPrintf("PutAppend:client[%d] start call kvserver[%v],commandId:%v", ck.clerkId, ck.leaderHint, args.CommandId)
-		ok := ck.servers[ck.leaderHint].Call("KVServer.PutAppend", &args, &reply)
-		if !ok || reply.Err == ErrWrongLeader {
+		go func() {
+			reply := PutAppendReply{}
+			ok := ck.servers[tar].Call("KVServer.PutAppend", &args, &reply)
+			resultChan <- node{ok, reply}
+		}()
+		select {
+		case receive := <-resultChan:
+			ok, reply := receive.ok, receive.reply.(PutAppendReply)
+			if !ok || reply.Err == ErrWrongLeader {
+				continue
+			}
+			DPrintf("PutAppend:client[%d] find Leader:%v,commandId%v,receive response", ck.clerkId, ck.leaderHint, args.CommandId)
+			return
+
+		case <-time.After(time.Second):
 			continue
 		}
-		// DPrintf("PutAppend:client[%d] find Leader:%v,wait response", ck.clerkId, ck.leaderHint)
-		break
-
 	}
 }
 

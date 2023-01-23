@@ -4,16 +4,15 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"6.824/labgob"
 	"6.824/labrpc"
 	"6.824/raft"
 )
 
-const Debug = true
+// const Debug = true
 
-// const Debug = false
+const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -34,6 +33,11 @@ type Op struct {
 	ServerId  int
 }
 
+type checkType struct {
+	ClerkId   int64
+	CommandId int
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -45,16 +49,9 @@ type KVServer struct {
 
 	// Your definitions here.
 	kvMap      map[string]string
-	clientCh   map[int]chan Op //logIndex->Op
-	lastSolved map[int64]int   //每个client最后已处理的commandId
-}
-
-type OptionArgs struct {
-	Key       string
-	Value     string
-	Op        string
-	ClerkId   int64
-	CommandId int
+	clientCond map[int]*sync.Cond //logIndex->Op
+	lastSolved map[int64]int      //每个client最后已处理的commandId
+	checkApply map[int]checkType  //logIndex->(clerkId,commandId) 判断该index命令是否为初始命令（即有无发生领导者变更导致覆盖日志）
 }
 
 /*
@@ -70,38 +67,48 @@ type OptionArgs struct {
 	6.	Leader通过WaitChan接受结果，执行Read类型操作，返回结果给Client. 或者Leader WaitChan超时，返回Client结果。
 */
 
-func (kv *KVServer) solve(args *OptionArgs) Err {
+func (kv *KVServer) solve(_Key string, _Value string, _Op string, _ClerkId int64, _CommandId int) Err {
 	kv.mu.Lock()
-	index, curTerm, isLeader := kv.rf.Start(Op{Tp: args.Op,
-		Key:       args.Key,
-		Value:     args.Value,
-		ClerkId:   args.ClerkId,
-		CommandId: args.CommandId,
+
+	if v, ok := kv.lastSolved[_ClerkId]; ok && v >= _CommandId {
+		//重复的任务，已经解决了直接返回
+		kv.mu.Unlock()
+		return OK
+	}
+	kv.mu.Unlock()
+	index, _, isLeader := kv.rf.Start(Op{Tp: _Op,
+		Key:       _Key,
+		Value:     _Value,
+		ClerkId:   _ClerkId,
+		CommandId: _CommandId,
 		ServerId:  kv.me,
 	})
 	if !isLeader {
-		defer kv.mu.Unlock()
 		return ErrWrongLeader
 	}
 	/*
 		[Applying client operations]
 		record where in the Raft log the client’s operation appears when you insert it.
 	*/
-	if _, ok := kv.clientCh[index]; !ok {
-		kv.clientCh[index] = make(chan Op)
+	kv.mu.Lock()
+	if _, ok := kv.clientCond[index]; !ok {
+		kv.clientCond[index] = sync.NewCond(&sync.Mutex{})
 	}
+	cond := kv.clientCond[index]
 	kv.mu.Unlock()
-
-	msg, err := kv.waitResponse(curTerm, index)
+	//wait response
+	cond.L.Lock()
+	cond.Wait()
+	cond.L.Unlock()
 
 	/*
 		[Applying client operations]
 		you can tell whether or not the client’s operation succeeded based on
 		whether the operation that came up for that index is in fact the one you put there.
 	*/
-
 	kv.mu.Lock()
-	if msg.ClerkId != args.ClerkId || msg.CommandId != args.CommandId {
+	var err Err
+	if kv.checkApply[index].ClerkId != _ClerkId || kv.checkApply[index].CommandId != _CommandId {
 		/*
 			[Applying client operations]
 			If it isn’t, a failure has happened and
@@ -109,187 +116,77 @@ func (kv *KVServer) solve(args *OptionArgs) Err {
 		*/
 		err = ErrWrongLeader
 	} else {
-		_, ok := kv.kvMap[args.Key]
-		// DPrintf("Get:KVserver[%d] response client[%v]'s command[%v]", kv.me, args.ClerkId, args.CommandId)
+		_, ok := kv.kvMap[_Key]
+		DPrintf("solve:KVserver[%d] response client[%v]'s command[%v]", kv.me, _ClerkId, _CommandId)
+		err = OK
 		if !ok {
 			err = ErrNoKey
 		}
+
 	}
-	delete(kv.clientCh, index)
+	delete(kv.clientCond, index)
+	delete(kv.checkApply, index)
 	kv.mu.Unlock()
 	return err
 }
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
-	kv.mu.Lock()
-	index, curTerm, isLeader := kv.rf.Start(Op{Tp: "Get",
-		Key:       args.Key,
-		ClerkId:   args.ClerkId,
-		CommandId: args.CommandId,
-		ServerId:  kv.me,
-	})
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
-		return
+	reply.Err = kv.solve(args.Key, "", "Get", args.ClerkId, args.CommandId)
+	if reply.Err == OK {
+		kv.mu.Lock()
+		defer kv.mu.Unlock()
+		reply.Value = kv.kvMap[args.Key]
 	}
-	/*
-		[Applying client operations]
-		record where in the Raft log the client’s operation appears when you insert it.
-	*/
-	if _, ok := kv.clientCh[index]; !ok {
-		kv.clientCh[index] = make(chan Op)
-	}
-	kv.mu.Unlock()
-
-	msg, err := kv.waitResponse(curTerm, index)
-	reply.Err = err
-	if err == ErrWrongLeader {
-		return
-	}
-	/*
-		[Applying client operations]
-		you can tell whether or not the client’s operation succeeded based on
-		whether the operation that came up for that index is in fact the one you put there.
-	*/
-
-	if msg.ClerkId != args.ClerkId || msg.CommandId != args.CommandId {
-		/*
-			[Applying client operations]
-			If it isn’t, a failure has happened and
-			an error can be returned to the client.
-		*/
-		reply.Err = ErrWrongLeader
-		return
-	}
-
-	kv.mu.Lock()
-	v, ok := kv.kvMap[args.Key]
-	// DPrintf("Get:KVserver[%d] response client[%v]'s command[%v]", kv.me, args.ClerkId, args.CommandId)
-	if !ok {
-		reply.Err = ErrNoKey
-		return
-	}
-	reply.Value = v
-	kv.mu.Unlock()
-
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	kv.mu.Lock()
-	index, curTerm, isLeader := kv.rf.Start(Op{Tp: args.Op,
-		Key:       args.Key,
-		Value:     args.Value,
-		ClerkId:   args.ClerkId,
-		CommandId: args.CommandId,
-		ServerId:  kv.me,
-	})
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
-		return
-	}
-	/*
-		[Applying client operations]
-		record where in the Raft log the client’s operation appears when you insert it.
-	*/
-	if _, ok := kv.clientCh[index]; !ok {
-		kv.clientCh[index] = make(chan Op)
-	}
-	kv.mu.Unlock()
-	msg, err := kv.waitResponse(curTerm, index)
-	reply.Err = err
-	if err == ErrWrongLeader {
-		return
-	}
-	/*
-		[Applying client operations]
-		you can tell whether or not the client’s operation succeeded based on
-		whether the operation that came up for that index is in fact the one you put there.
-	*/
-	if msg.ClerkId != args.ClerkId || msg.CommandId != args.CommandId {
-		/*
-			[Applying client operations]
-			If it isn’t, a failure has happened and
-			an error can be returned to the client.
-		*/
-		reply.Err = ErrWrongLeader
-		return
-	}
-}
-
-func (kv *KVServer) waitResponse(originTerm int, logIndex int) (Op, Err) {
-	timeCounter := time.NewTimer(500 * time.Millisecond)
-	for {
-		select {
-		case res := <-kv.clientCh[logIndex]:
-			return res, OK
-		case <-timeCounter.C:
-			nowTerm, isLeader := kv.rf.GetState()
-			if nowTerm != originTerm || !isLeader {
-				return Op{}, ErrWrongLeader
-			}
-			DPrintf("[waitResponse]server[%v]'s logIndex[%v] timeout,reset", kv.me, logIndex)
-			timeCounter.Reset(500 * time.Millisecond)
-		}
-	}
-}
-
-func (kv *KVServer) responseWait(logIndex int, msg Op) {
-	timeCounter := time.NewTimer(200 * time.Millisecond)
-	select {
-	case kv.clientCh[logIndex] <- msg:
-		return
-	case <-timeCounter.C:
-		return
-	}
+	reply.Err = kv.solve(args.Key, args.Value, args.Op, args.ClerkId, args.CommandId)
 }
 
 func (kv *KVServer) ApplierMonitor() {
 	for !kv.killed() {
-		tmp := <-kv.applyCh
-		if tmp.SnapshotValid {
-			// kv.readPersist(tmp.Snapshot)
+		msg := <-kv.applyCh
+		kv.mu.Lock()
+		if msg.SnapshotValid {
+			// kv.readPersist(msg.Snapshot)
 			continue
 		}
-
-		if tmp.CommandValid {
-			kv.mu.Lock()
-			cmd := tmp.Command.(Op)
+		DPrintf("%v**********%v**********", kv.me, msg)
+		if msg.CommandValid {
+			cmd := msg.Command.(Op)
 			/*
 				[Duplicate detection]
 				server keeps track of the latest sequence number it has seen for each client,
 				and simply ignores any operation that it has already seen.
 			*/
-			if !kv.checkIsDuplicate(cmd.ClerkId, cmd.CommandId) {
+			if cmd.Tp != "Get" && !kv.checkIsDuplicate(cmd.ClerkId, cmd.CommandId) {
 				if cmd.Tp == "Append" {
 					kv.kvMap[cmd.Key] += cmd.Value
-					// DPrintf("kv[%v] success Append client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
+					DPrintf("kv[%v] success Append client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
 				}
 				if cmd.Tp == "Put" {
 					kv.kvMap[cmd.Key] = cmd.Value
-					// DPrintf("kv[%v] success Put client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
+					DPrintf("kv[%v] success Put client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
 				}
 				kv.lastSolved[cmd.ClerkId] = cmd.CommandId
 				DPrintf("[ApplierMonitor]\tserver[%v]update clerkId:%v\tcommandId:%v", kv.me, cmd.ClerkId, cmd.CommandId)
 			}
-			kv.mu.Unlock()
-
-			_, isleader := kv.rf.GetState()
-			if isleader && cmd.ServerId == kv.me {
-				kv.responseWait(tmp.CommandIndex, cmd)
+			if cond, ok := kv.clientCond[msg.CommandIndex]; ok {
+				kv.checkApply[msg.CommandIndex] = checkType{cmd.ClerkId, cmd.CommandId}
+				cond.Broadcast() //如果存在说明命令是在该server接收的
 			}
 
 		}
 
+		kv.mu.Unlock()
 	}
 }
 
 func (kv *KVServer) checkIsDuplicate(clerkId int64, commandId int) bool {
 	v, ok := kv.lastSolved[clerkId]
-	DPrintf("[checkIsDuplicate]\t%v,%v,%v,%v", clerkId, commandId, v, ok)
+	// DPrintf("[checkIsDuplicate]\t%v,%v,%v,%v", clerkId, commandId, v, ok)
 	if !ok {
 		return false
 	}
@@ -339,8 +236,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		maxraftstate: maxraftstate,
 		applyCh:      make(chan raft.ApplyMsg),
 		kvMap:        make(map[string]string),
-		clientCh:     make(map[int]chan Op),
+		clientCond:   make(map[int]*sync.Cond),
 		lastSolved:   make(map[int64]int),
+		checkApply:   make(map[int]checkType),
 	}
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
