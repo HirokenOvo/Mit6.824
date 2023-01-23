@@ -1,6 +1,7 @@
 package kvraft
 
 import (
+	"bytes"
 	"log"
 	"sync"
 	"sync/atomic"
@@ -30,7 +31,6 @@ type Op struct {
 	Value     string
 	ClerkId   int64
 	CommandId int
-	ServerId  int
 }
 
 type checkType struct {
@@ -46,11 +46,11 @@ type KVServer struct {
 	dead    int32 // set by Kill()
 
 	maxraftstate int // snapshot if log grows this big
-
+	persister    *raft.Persister
 	// Your definitions here.
-	kvMap      map[string]string
+	kvMap      map[string]string  //持久化
 	clientCond map[int]*sync.Cond //logIndex->Op
-	lastSolved map[int64]int      //每个client最后已处理的commandId
+	lastSolved map[int64]int      //每个client最后已处理的commandId,持久化
 	checkApply map[int]checkType  //logIndex->(clerkId,commandId) 判断该index命令是否为初始命令（即有无发生领导者变更导致覆盖日志）
 }
 
@@ -81,7 +81,6 @@ func (kv *KVServer) solve(_Key string, _Value string, _Op string, _ClerkId int64
 		Value:     _Value,
 		ClerkId:   _ClerkId,
 		CommandId: _CommandId,
-		ServerId:  kv.me,
 	})
 	if !isLeader {
 		return ErrWrongLeader
@@ -150,10 +149,9 @@ func (kv *KVServer) ApplierMonitor() {
 		msg := <-kv.applyCh
 		kv.mu.Lock()
 		if msg.SnapshotValid {
-			// kv.readPersist(msg.Snapshot)
-			continue
+			//从leader接收到快照，直接读取快照数据覆盖应用层
+			kv.readSnapShot(msg.Snapshot)
 		}
-		DPrintf("%v**********%v**********", kv.me, msg)
 		if msg.CommandValid {
 			cmd := msg.Command.(Op)
 			/*
@@ -161,7 +159,7 @@ func (kv *KVServer) ApplierMonitor() {
 				server keeps track of the latest sequence number it has seen for each client,
 				and simply ignores any operation that it has already seen.
 			*/
-			if cmd.Tp != "Get" && !kv.checkIsDuplicate(cmd.ClerkId, cmd.CommandId) {
+			if !kv.checkIsDuplicate(cmd.ClerkId, cmd.CommandId) {
 				if cmd.Tp == "Append" {
 					kv.kvMap[cmd.Key] += cmd.Value
 					DPrintf("kv[%v] success Append client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
@@ -173,9 +171,18 @@ func (kv *KVServer) ApplierMonitor() {
 				kv.lastSolved[cmd.ClerkId] = cmd.CommandId
 				DPrintf("[ApplierMonitor]\tserver[%v]update clerkId:%v\tcommandId:%v", kv.me, cmd.ClerkId, cmd.CommandId)
 			}
-			if cond, ok := kv.clientCond[msg.CommandIndex]; ok {
+			/*
+				compare maxraftstate to persister.RaftStateSize()
+				it should save a snapshot by calling Raft's Snapshot
+				检测raft日志量超过限制后向raft层发出快照命令
+			*/
+			if kv.maxraftstate != -1 && float64(kv.persister.RaftStateSize()) > 0.9*float64(kv.maxraftstate) {
+				kv.saveSnapShot(msg.CommandIndex)
+			}
+
+			if cond, ok := kv.clientCond[msg.CommandIndex]; ok { //如果存在说明命令是在该server接收的
 				kv.checkApply[msg.CommandIndex] = checkType{cmd.ClerkId, cmd.CommandId}
-				cond.Broadcast() //如果存在说明命令是在该server接收的
+				cond.Broadcast()
 			}
 
 		}
@@ -191,6 +198,33 @@ func (kv *KVServer) checkIsDuplicate(clerkId int64, commandId int) bool {
 		return false
 	}
 	return commandId <= v
+}
+
+func (kv *KVServer) saveSnapShot(cmdIdx int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(kv.kvMap)
+	e.Encode(kv.lastSolved)
+	data := w.Bytes()
+	kv.rf.Snapshot(cmdIdx, data)
+}
+
+func (kv *KVServer) readSnapShot(data []byte) {
+	if data == nil || len(data) < 1 { // bootstrap without any state?
+		return
+	}
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var xxx map[string]string
+	var yyy map[int64]int
+	if d.Decode(&xxx) != nil ||
+		d.Decode(&yyy) != nil {
+		DPrintf("readPersist error!")
+	} else {
+		kv.kvMap = xxx
+		kv.lastSolved = yyy
+	}
 }
 
 //
@@ -234,6 +268,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	labgob.Register(Op{})
 	kv := &KVServer{me: me,
 		maxraftstate: maxraftstate,
+		persister:    persister,
 		applyCh:      make(chan raft.ApplyMsg),
 		kvMap:        make(map[string]string),
 		clientCond:   make(map[int]*sync.Cond),
@@ -241,7 +276,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 		checkApply:   make(map[int]checkType),
 	}
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
-
+	kv.readSnapShot(kv.persister.ReadSnapshot())
 	// You may need initialization code here.
 	go kv.ApplierMonitor()
 

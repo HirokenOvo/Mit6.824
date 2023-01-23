@@ -69,7 +69,7 @@ func (rf *Raft) switchState(state int) {
 			rf.nextIndex[peer] = rf.getRealLen()
 			rf.matchIndex[peer] = 0
 		}
-		DPrintf("peer[%v] become leader,len:%v,currentTerm%v\n", rf.me, rf.getRealLen(), rf.currentTerm)
+		// DPrintf("peer[%v] become leader,len:%v,currentTerm%v\n", rf.me, rf.getRealLen(), rf.currentTerm)
 	}
 }
 
@@ -279,6 +279,7 @@ func (rf *Raft) SendInstallSnapshotEntries(peer int) {
 	ok := rf.InstallSnapshotEntries(peer, &args, &reply)
 	if !ok {
 		// DPrintf("leader[%v] call peer[%d] failed while sending Snapshot\n", rf.me, peer)
+		return
 	}
 
 	rf.mu.Lock()
@@ -336,7 +337,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 		copy(tmplog, rf.log[idx+1:])
 		rf.log = append([]Entry{{Term: 0}}, tmplog...)
 	}
-
 	rf.commitIndex = max(rf.commitIndex, index)
 	rf.lastApplied = max(rf.lastApplied, index)
 
@@ -420,7 +420,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if rf.getRealLastIdx() < args.PreLogIndex {
 		reply.Success = false
 		reply.ConflictTerm = -1
-		reply.ConflictIndex = rf.getRealLastIdx() + 1
+		reply.ConflictIndex = rf.getRealLen()
 		return
 	}
 	/*	3
@@ -449,7 +449,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	*/
 	conflictIdx := -1
 	for idx := range args.Entries {
-		if preLogIndex+idx+1 < 0 {
+		if preLogIndex+idx+1 <= 0 {
 			continue
 		}
 		if rf.getFakeLastIdx() < preLogIndex+idx+1 || rf.log[preLogIndex+idx+1] != args.Entries[idx] {
@@ -457,12 +457,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 	}
-
+	DPrintf("id:%v\tpre:\t%v", rf.me, len(rf.log))
 	if conflictIdx != -1 {
 		tmplog := make([]Entry, preLogIndex+conflictIdx+1)
 		copy(tmplog, rf.log[:preLogIndex+conflictIdx+1])
 		rf.log = append(tmplog, args.Entries[conflictIdx:]...)
 	}
+	DPrintf("id:%v\taft:\t%v", rf.me, len(rf.log))
 
 	/*	5
 		If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
@@ -721,7 +722,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 func (rf *Raft) startElection() {
 	rf.currentTerm++
 	rf.votedFor = rf.me
-	DPrintf("Peer[%d] try to become leader,votefor:%v,currentTerm:%v\n", rf.me, rf.votedFor, rf.currentTerm)
+	// DPrintf("Peer[%d] try to become leader,votefor:%v,currentTerm:%v\n", rf.me, rf.votedFor, rf.currentTerm)
 	rf.electionTimer.Reset(getRandTimeout())
 	args := RequestVoteArgs{Term: rf.currentTerm,
 		CandidateID:  rf.me,
@@ -876,7 +877,6 @@ func (rf *Raft) ticker() {
 //
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	// DPrintf("peer[%v] start", me)
 	rf := &Raft{
 		peers:          peers,
 		persister:      persister,
