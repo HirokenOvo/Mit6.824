@@ -78,7 +78,7 @@ func (ck *Clerk) Get(key string) string {
 		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 		tar := ck.leaderHint
 		ck.mu.Unlock()
-		DPrintf("Get:client[%d] start call kvserver[%v],commandId:%v", ck.clerkId, ck.leaderHint, args.CommandId)
+		// DPrintf("Get:client[%d] start call kvserver[%v],commandId:%v", ck.clerkId, ck.leaderHint, args.CommandId)
 		go func() {
 			reply := GetReply{}
 			ok := ck.servers[tar].Call("KVServer.Get", &args, &reply)
@@ -96,7 +96,7 @@ func (ck *Clerk) Get(key string) string {
 				reply.Value = ""
 			}
 			return reply.Value
-		case <-time.After(time.Second):
+		case <-time.After(time.Millisecond * 500):
 			continue
 		}
 
@@ -131,7 +131,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
 		tar := ck.leaderHint
 		ck.mu.Unlock()
-		DPrintf("PutAppend:client[%d] start call kvserver[%v],commandId:%v", ck.clerkId, ck.leaderHint, args.CommandId)
+		// DPrintf("PutAppend:client[%d] start call kvserver[%v],commandId:%v", ck.clerkId, ck.leaderHint, args.CommandId)
 		go func() {
 			reply := PutAppendReply{}
 			ok := ck.servers[tar].Call("KVServer.PutAppend", &args, &reply)
@@ -143,10 +143,10 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			if !ok || reply.Err == ErrWrongLeader {
 				continue
 			}
-			DPrintf("PutAppend:client[%d] find Leader:%v,commandId%v,receive response", ck.clerkId, ck.leaderHint, args.CommandId)
+			DPrintf("PutAppend:client[%d] find Leader:%v,commandId%v,\ncmd:%v->%v", ck.clerkId, ck.leaderHint, args.CommandId, args.Key, args.Value)
 			return
 
-		case <-time.After(time.Second):
+		case <-time.After(time.Millisecond * 500):
 			continue
 		}
 	}

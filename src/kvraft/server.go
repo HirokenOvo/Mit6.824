@@ -11,9 +11,9 @@ import (
 	"6.824/raft"
 )
 
-// const Debug = true
+const Debug = true
 
-const Debug = false
+// const Debug = false
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
 	if Debug {
@@ -116,7 +116,7 @@ func (kv *KVServer) solve(_Key string, _Value string, _Op string, _ClerkId int64
 		err = ErrWrongLeader
 	} else {
 		_, ok := kv.kvMap[_Key]
-		DPrintf("solve:KVserver[%d] response client[%v]'s command[%v]", kv.me, _ClerkId, _CommandId)
+		// DPrintf("solve:KVserver[%d] response client[%v]'s command[%v]", kv.me, _ClerkId, _CommandId)
 		err = OK
 		if !ok {
 			err = ErrNoKey
@@ -151,6 +151,7 @@ func (kv *KVServer) ApplierMonitor() {
 		if msg.SnapshotValid {
 			//从leader接收到快照，直接读取快照数据覆盖应用层
 			kv.readSnapShot(msg.Snapshot)
+			DPrintf("server[%v] receive snapshot", kv.me)
 		}
 		if msg.CommandValid {
 			cmd := msg.Command.(Op)
@@ -162,14 +163,14 @@ func (kv *KVServer) ApplierMonitor() {
 			if !kv.checkIsDuplicate(cmd.ClerkId, cmd.CommandId) {
 				if cmd.Tp == "Append" {
 					kv.kvMap[cmd.Key] += cmd.Value
-					DPrintf("kv[%v] success Append client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
+					// DPrintf("kv[%v] success Append client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
 				}
 				if cmd.Tp == "Put" {
 					kv.kvMap[cmd.Key] = cmd.Value
-					DPrintf("kv[%v] success Put client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
+					// DPrintf("kv[%v] success Put client[%v]'s cmd[%v]", kv.me, cmd.ClerkId, cmd.CommandId)
 				}
 				kv.lastSolved[cmd.ClerkId] = cmd.CommandId
-				DPrintf("[ApplierMonitor]\tserver[%v]update clerkId:%v\tcommandId:%v", kv.me, cmd.ClerkId, cmd.CommandId)
+				// DPrintf("[ApplierMonitor]\tserver[%v]update clerkId:%v\tcommandId:%v", kv.me, cmd.ClerkId, cmd.CommandId)
 			}
 			/*
 				compare maxraftstate to persister.RaftStateSize()
@@ -205,6 +206,7 @@ func (kv *KVServer) saveSnapShot(cmdIdx int) {
 	e := labgob.NewEncoder(w)
 	e.Encode(kv.kvMap)
 	e.Encode(kv.lastSolved)
+	DPrintf("%v saveSnapshot:%v", kv.me, kv.kvMap)
 	data := w.Bytes()
 	kv.rf.Snapshot(cmdIdx, data)
 }
@@ -223,6 +225,7 @@ func (kv *KVServer) readSnapShot(data []byte) {
 		DPrintf("readPersist error!")
 	} else {
 		kv.kvMap = xxx
+		DPrintf("%v readSnapshot:%v", kv.me, kv.kvMap)
 		kv.lastSolved = yyy
 	}
 }

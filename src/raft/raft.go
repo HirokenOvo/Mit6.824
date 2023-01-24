@@ -88,7 +88,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
-
+	CommandTerm  int
 	// For 2D:
 	SnapshotValid bool
 	Snapshot      []byte
@@ -251,10 +251,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			SnapshotTerm:  args.LastIncludedTerm,
 			SnapshotIndex: args.LastIncludedIndex}
 		rf.applyCh <- msg
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), args.Data)
 	}()
+	rf.persister.SaveStateAndSnapshot(rf.persister.ReadRaftState(), args.Data)
 }
 
 func (rf *Raft) InstallSnapshotEntries(server int, args *InstallSnapshotArgs, reply *InstallSnapshotReply) bool {
@@ -263,7 +261,6 @@ func (rf *Raft) InstallSnapshotEntries(server int, args *InstallSnapshotArgs, re
 }
 
 func (rf *Raft) SendInstallSnapshotEntries(peer int) {
-	rf.mu.Lock()
 	if rf.state != LEADER {
 		rf.mu.Unlock()
 		return
@@ -273,17 +270,19 @@ func (rf *Raft) SendInstallSnapshotEntries(peer int) {
 		LastIncludedIndex: rf.snapshot.LastIncludedIndex,
 		LastIncludedTerm:  rf.snapshot.LastIncludedTerm,
 		Data:              rf.persister.ReadSnapshot()}
+	DPrintf("leader[%v]start deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
 	rf.mu.Unlock()
 
 	reply := InstallSnapshotReply{}
 	ok := rf.InstallSnapshotEntries(peer, &args, &reply)
+	DPrintf("check::::leader[%v],peer[%v],%v,%v", args.LeaderId, peer, ok, !ok)
 	if !ok {
 		// DPrintf("leader[%v] call peer[%d] failed while sending Snapshot\n", rf.me, peer)
 		return
 	}
 
 	rf.mu.Lock()
-	// DPrintf("leader[%v] deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
+	DPrintf("leader[%v] deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
 	defer rf.mu.Unlock()
 
 	if rf.state != LEADER || rf.currentTerm != args.Term || rf.snapshot.LastIncludedIndex != args.LastIncludedIndex {
@@ -320,8 +319,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//快照点还未提交或已经快照过则无需快照
-	if index > rf.commitIndex || index <= rf.snapshot.LastIncludedIndex {
+	//快照点若还未应用到状态机会导致日志丢失
+	//已经快照过则无需快照
+	if index > rf.lastApplied || index <= rf.snapshot.LastIncludedIndex {
 		return
 	}
 	// DPrintf("peer[%v] Snapshot ,range->%v\n", rf.me, index)
@@ -457,13 +457,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			break
 		}
 	}
-	DPrintf("id:%v\tpre:\t%v", rf.me, len(rf.log))
+	// DPrintf("id:%v\tpre:\t%v", rf.me, len(rf.log))
 	if conflictIdx != -1 {
 		tmplog := make([]Entry, preLogIndex+conflictIdx+1)
 		copy(tmplog, rf.log[:preLogIndex+conflictIdx+1])
 		rf.log = append(tmplog, args.Entries[conflictIdx:]...)
 	}
-	DPrintf("id:%v\taft:\t%v", rf.me, len(rf.log))
+	// DPrintf("id:%v\taft:\t%v", rf.me, len(rf.log))
 
 	/*	5
 		If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
@@ -504,8 +504,7 @@ func (rf *Raft) leaderAppendEntries() {
 				->	log未删除,发送附加日志
 			*/
 			if rf.nextIndex[peer]-1 < rf.snapshot.LastIncludedIndex {
-				go rf.SendInstallSnapshotEntries(peer)
-				rf.mu.Unlock()
+				rf.SendInstallSnapshotEntries(peer)
 				return
 			}
 
@@ -608,13 +607,14 @@ func (rf *Raft) updateCommit() {
 				msg := ApplyMsg{CommandValid: true,
 					Command:       entry.Command,
 					CommandIndex:  lastApplied + idx + 1,
+					CommandTerm:   entry.Term,
 					SnapshotValid: false,
 				}
 				rf.applyCh <- msg
 				rf.mu.Lock()
 				rf.lastApplied = max(rf.lastApplied, msg.CommandIndex)
 				rf.mu.Unlock()
-				// DPrintf("Peer[%d] success commit log[%d] %v to client", rf.me, lastApplied+idx+1, msg.Command)
+				DPrintf("Peer[%d] success commit log[%d] %v to client", rf.me, lastApplied+idx+1, msg.Command)
 			}
 		}()
 
