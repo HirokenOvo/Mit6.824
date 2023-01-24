@@ -270,12 +270,10 @@ func (rf *Raft) SendInstallSnapshotEntries(peer int) {
 		LastIncludedIndex: rf.snapshot.LastIncludedIndex,
 		LastIncludedTerm:  rf.snapshot.LastIncludedTerm,
 		Data:              rf.persister.ReadSnapshot()}
-	DPrintf("leader[%v]start deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
 	rf.mu.Unlock()
 
 	reply := InstallSnapshotReply{}
 	ok := rf.InstallSnapshotEntries(peer, &args, &reply)
-	DPrintf("check::::leader[%v],peer[%v],%v,%v", args.LeaderId, peer, ok, !ok)
 	if !ok {
 		// DPrintf("leader[%v] call peer[%d] failed while sending Snapshot\n", rf.me, peer)
 		return
@@ -319,9 +317,9 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (2D).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//快照点若还未应用到状态机会导致日志丢失
+	//快照点若还未应用到状态机会导致日志丢失（这种情况应该不会发生,应用层收到了日志之后才发出snapshot命令）
 	//已经快照过则无需快照
-	if index > rf.lastApplied || index <= rf.snapshot.LastIncludedIndex {
+	if index > rf.commitIndex || index <= rf.snapshot.LastIncludedIndex {
 		return
 	}
 	// DPrintf("peer[%v] Snapshot ,range->%v\n", rf.me, index)
@@ -610,10 +608,10 @@ func (rf *Raft) updateCommit() {
 					CommandTerm:   entry.Term,
 					SnapshotValid: false,
 				}
-				rf.applyCh <- msg
 				rf.mu.Lock()
 				rf.lastApplied = max(rf.lastApplied, msg.CommandIndex)
 				rf.mu.Unlock()
+				rf.applyCh <- msg
 				DPrintf("Peer[%d] success commit log[%d] %v to client", rf.me, lastApplied+idx+1, msg.Command)
 			}
 		}()
