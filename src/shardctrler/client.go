@@ -12,6 +12,14 @@ import "math/big"
 type Clerk struct {
 	servers []*labrpc.ClientEnd
 	// Your data here.
+	clerkId    int64
+	commandId  int
+	leaderHint int
+}
+
+type node struct {
+	ok    bool
+	reply interface{}
 }
 
 func nrand() int64 {
@@ -22,80 +30,150 @@ func nrand() int64 {
 }
 
 func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.servers = servers
 	// Your code here.
+	ck := &Clerk{
+		servers:    servers,
+		clerkId:    nrand(),
+		leaderHint: 0,
+		commandId:  0,
+	}
 	return ck
 }
 
+// Query(num) -> fetch Config # num, or latest config if num==-1.
 func (ck *Clerk) Query(num int) Config {
-	args := &QueryArgs{}
 	// Your code here.
-	args.Num = num
+	args := &QueryArgs{
+		Num:       num,
+		CommandId: ck.commandId,
+		ClientId:  ck.clerkId,
+	}
+	ck.commandId++
+	resultChan := make(chan node)
+
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
-			var reply QueryReply
-			ok := srv.Call("ShardCtrler.Query", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return reply.Config
+		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
+		tar := ck.leaderHint
+		go func() {
+			reply := QueryReply{}
+			ok := ck.servers[tar].Call("ShardCtrler.Query", args, &reply)
+			resultChan <- node{ok, reply}
+		}()
+
+		select {
+		case receive := <-resultChan:
+			ok, reply := receive.ok, receive.reply.(QueryReply)
+			if !ok || reply.WrongLeader {
+				continue
 			}
+			return reply.Config
+		case <-time.After(time.Millisecond * 500):
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 
+// Join(servers) -- add a set of groups (gid -> server-list mapping).
 func (ck *Clerk) Join(servers map[int][]string) {
-	args := &JoinArgs{}
 	// Your code here.
-	args.Servers = servers
+	args := &JoinArgs{
+		Servers:   servers,
+		CommandId: ck.commandId,
+		ClientId:  ck.clerkId,
+	}
+	ck.commandId++
+	resultChan := make(chan node)
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
-			var reply JoinReply
-			ok := srv.Call("ShardCtrler.Join", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
+		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
+		tar := ck.leaderHint
+		go func() {
+			reply := JoinReply{}
+			ok := ck.servers[tar].Call("ShardCtrler.Join", args, &reply)
+			resultChan <- node{ok, reply}
+		}()
+
+		select {
+		case receive := <-resultChan:
+			ok, reply := receive.ok, receive.reply.(JoinReply)
+			if !ok || reply.WrongLeader {
+				continue
 			}
+			return
+		case <-time.After(time.Millisecond * 500):
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 
+// Leave(gids) -- delete a set of groups.
 func (ck *Clerk) Leave(gids []int) {
-	args := &LeaveArgs{}
 	// Your code here.
-	args.GIDs = gids
+	args := &LeaveArgs{
+		GIDs:      gids,
+		CommandId: ck.commandId,
+		ClientId:  ck.clerkId,
+	}
+	ck.commandId++
+	resultChan := make(chan node)
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
-			var reply LeaveReply
-			ok := srv.Call("ShardCtrler.Leave", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
+		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
+		tar := ck.leaderHint
+		go func() {
+			reply := LeaveReply{}
+			ok := ck.servers[tar].Call("ShardCtrler.Leave", args, &reply)
+			resultChan <- node{ok, reply}
+		}()
+
+		select {
+		case receive := <-resultChan:
+			ok, reply := receive.ok, receive.reply.(LeaveReply)
+			if !ok || reply.WrongLeader {
+				continue
 			}
+			return
+		case <-time.After(time.Millisecond * 500):
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
 }
 
+// Move(shard, gid) -- hand off one shard from current owner to gid.
 func (ck *Clerk) Move(shard int, gid int) {
-	args := &MoveArgs{}
 	// Your code here.
-	args.Shard = shard
-	args.GID = gid
+	args := &MoveArgs{
+		Shard:     shard,
+		GID:       gid,
+		CommandId: ck.commandId,
+		ClientId:  ck.clerkId,
+	}
+	ck.commandId++
+	resultChan := make(chan node)
 
 	for {
 		// try each known server.
-		for _, srv := range ck.servers {
-			var reply MoveReply
-			ok := srv.Call("ShardCtrler.Move", args, &reply)
-			if ok && reply.WrongLeader == false {
-				return
+		ck.leaderHint = (ck.leaderHint + 1) % len(ck.servers)
+		tar := ck.leaderHint
+		go func() {
+			reply := MoveReply{}
+			ok := ck.servers[tar].Call("ShardCtrler.Move", args, &reply)
+			resultChan <- node{ok, reply}
+		}()
+
+		select {
+		case receive := <-resultChan:
+			ok, reply := receive.ok, receive.reply.(MoveReply)
+			if !ok || reply.WrongLeader {
+				continue
 			}
+			return
+		case <-time.After(time.Millisecond * 500):
+			continue
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
+
 }
