@@ -38,13 +38,13 @@ const (
 
 func getRandTimeout() time.Duration {
 	r := rand.New(rand.NewSource(time.Now().UnixMicro()))
-	electionTimeOut := r.Int63()%(600-450) + 450 //随机产生的选举超时时间 450ms<= x<=600ms
+	electionTimeOut := r.Int63()%(600-450) + 450 // 随机产生的选举超时时间 450ms<= x<=600ms
 	return time.Duration(electionTimeOut) * time.Millisecond
 }
 
 func (rf *Raft) switchState(state int) {
 	defer rf.persist()
-	//不加这段会有bug，原因未知，猜测计时器奇怪的原因
+	// 不加这段会有bug，原因未知，猜测计时器奇怪的原因
 	if state == rf.state {
 		if state == FOLLOWER {
 			rf.votedFor = -1
@@ -52,7 +52,7 @@ func (rf *Raft) switchState(state int) {
 		return
 	}
 
-	//任期改变转换角色，votefor只有任期改变才初始化，保证一个任期只投一票
+	// 任期改变转换角色，votefor只有任期改变才初始化，保证一个任期只投一票
 
 	rf.state = state
 	switch state {
@@ -96,7 +96,7 @@ type ApplyMsg struct {
 	SnapshotIndex int
 }
 
-//log entry
+// log entry
 type Entry struct {
 	Command interface{}
 	Term    int
@@ -139,14 +139,10 @@ type Raft struct {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-	var term int
-	var isleader bool
-	// // Your code here (2A).
+	// Your code here (2A).
 	rf.mu.Lock()
-	term = rf.currentTerm
-	isleader = rf.state == LEADER
-	rf.mu.Unlock()
-	return term, isleader
+	defer rf.mu.Unlock()
+	return rf.currentTerm, rf.state == LEADER
 }
 
 //
@@ -231,6 +227,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	}
 	reply.Term = rf.currentTerm
 
+	// 砍去快照包含的log部分
 	if args.LastIncludedIndex >= rf.getRealLastIdx() {
 		rf.log = []Entry{{Term: 0}}
 	} else {
@@ -244,6 +241,8 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 	rf.snapshot.LastIncludedIndex = args.LastIncludedIndex
 	rf.snapshot.LastIncludedTerm = args.LastIncludedTerm
 	rf.persist()
+
+	// 协程防止程序堵塞
 	go func() {
 		msg := ApplyMsg{CommandValid: false,
 			SnapshotValid: true,
@@ -280,7 +279,7 @@ func (rf *Raft) SendInstallSnapshotEntries(peer int) {
 	}
 
 	rf.mu.Lock()
-	DPrintf("leader[%v] deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
+	// DPrintf("leader[%v] deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
 	defer rf.mu.Unlock()
 
 	if rf.state != LEADER || rf.currentTerm != args.Term || rf.snapshot.LastIncludedIndex != args.LastIncludedIndex {
@@ -592,8 +591,6 @@ func (rf *Raft) leaderAppendEntries() {
 }
 
 func (rf *Raft) updateCommit() {
-	// rf.mu.Lock()
-	// defer rf.mu.Unlock()
 	lastApplied := max(rf.lastApplied, rf.snapshot.LastIncludedIndex)
 	if rf.commitIndex > lastApplied {
 		base := rf.real2Fake(lastApplied)
@@ -612,7 +609,7 @@ func (rf *Raft) updateCommit() {
 				rf.lastApplied = max(rf.lastApplied, msg.CommandIndex)
 				rf.mu.Unlock()
 				rf.applyCh <- msg
-				DPrintf("Peer[%d] success commit log[%d] %v to client", rf.me, lastApplied+idx+1, msg.Command)
+				// DPrintf("Peer[%d] success commit log[%d] %v to client", rf.me, lastApplied+idx+1, msg.Command)
 			}
 		}()
 
@@ -670,6 +667,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if lastLogTerm == 0 {
 			lastLogTerm = rf.snapshot.LastIncludedTerm
 		}
+		/*
+			If votedFor is null or candidateId,
+			and candidate’s log is at least as up-to-date as receiver’s log, grant vote
+		*/
 		if lastLogTerm < args.LastLogTerm || (lastLogTerm == args.LastLogTerm && rf.getRealLastIdx() <= args.LastLogIndex) {
 			rf.switchState(FOLLOWER)
 			rf.votedFor = args.CandidateID
