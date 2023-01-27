@@ -55,16 +55,16 @@ type KVServer struct {
 }
 
 /*
-	1.	在一个Loop里，全员监听一个指标，当这个指标发生变化时，会触发操作
+	1.	client传来请求后，server检查条件
 	2.	只有Leader能够触发这个条件，follower不主动触发，等待被同步
-	3.	条件被触发后，Leader判定条件是否准确，交由Raft特定的Op Log Entry; 根据需要设置WaitChan等待结果，同时设置Timeout
+	3.	条件被触发后，Leader判定条件是否准确，交由Raft特定的Op Log Entry; 根据需要设置Cond等待结果
 	4.	Raft将Leader Op 同步给大家，ApplyEntry给上层每个Server
 	5.	Servers(包括Leader)读取Raft Apply Op 进行如下操作:
 			1)	Dupulication Detection
 			2)	执行Write，Update这种类型的操作，Read类型操作不执行
 			3)	判定Snapshot条件，满足，则SnapShot
-			4)	如果有WaitChan在等待，返回结果给WaitChan
-	6.	Leader通过WaitChan接受结果，执行Read类型操作，返回结果给Client. 或者Leader WaitChan超时，返回Client结果。
+			4)	如果有WaitCond在等待，唤醒WaitCond
+	6.	Leader执行Read操作并返回值
 */
 
 func (kv *KVServer) solve(_Key string, _Value string, _Op string, _ClerkId int64, _CommandId int) Err {
@@ -192,6 +192,7 @@ func (kv *KVServer) ApplierMonitor() {
 	}
 }
 
+// 检查请求是否重复
 func (kv *KVServer) checkIsDuplicate(clerkId int64, commandId int) bool {
 	v, ok := kv.lastSolved[clerkId]
 	// DPrintf("[checkIsDuplicate]\t%v,%v,%v,%v", clerkId, commandId, v, ok)

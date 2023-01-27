@@ -85,6 +85,7 @@ func (ck *Clerk) Get(key string) string {
 			resultChan <- node{ok, reply}
 
 		}()
+		// 利用channel设置超时,500ms未收到响应重试
 		select {
 		case receive := <-resultChan:
 			ok, reply := receive.ok, receive.reply.(GetReply)
