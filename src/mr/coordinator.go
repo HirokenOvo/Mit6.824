@@ -10,123 +10,102 @@ import (
 	"time"
 )
 
-
 type Coordinator struct {
 	// Your definitions here.
-	files			[]string	//files list
-	nMap			int			//tot Map nums
-	nReduce			int			//tot Reduce nums
-	edMap			int			//finished Map nums
-	statusMap		[]int		//Task Map status 0 undo 1 doing 2 done
-	edReduce		int			//finished Reduce nums
-	statusReduce	[]int		//Task Reduce status
-	mu				sync.Mutex	//mutex
+	files        []string   //files list
+	nMap         int        //tot Map nums
+	nReduce      int        //tot Reduce nums
+	edMap        int        //finished Map nums
+	statusMap    []int      //Task Map status 0 undo 1 doing 2 done
+	edReduce     int        //finished Reduce nums
+	statusReduce []int      //Task Reduce status
+	mu           sync.Mutex //mutex
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-
-func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
+func (c *Coordinator) Allocate(request *Request, reply *Reply) error {
 	//process request information
-	switch request.TaskType{
-		case 1 :{
-			c.mu.Lock()
-			if c.statusMap[request.TaskId]==1{
-				c.statusMap[request.TaskId]=2
-				// fmt.Printf("MapTask%v:over\n",request.TaskId)
-				c.edMap++
-			}
-			c.mu.Unlock()
-		}
-		case 2:{
-			c.mu.Lock()
-			if c.statusReduce[request.TaskId]==1{
-				c.statusReduce[request.TaskId]=2
-				// fmt.Printf("ReduceTask%v:over\n",request.TaskId)
-				c.edReduce++
-			}
-			c.mu.Unlock()
-		}
-		default:{}
-	}
-	request.TaskType=0
-
-	//allocate task
 	c.mu.Lock()
-	// fmt.Printf("MapTask Progress: %v/%v,ReduceTask Progress: %v/%v\n",c.edMap,c.nMap,c.edReduce,c.nReduce)
-	if c.edMap<c.nMap{
-		taskId:=-1
-		for i :=0;i<c.nMap;i++{
-			if c.statusMap[i]==0 {
-				taskId=i
-				break
-			}
+	defer c.mu.Unlock()
+	switch request.TaskType {
+	case 1:
+		if c.statusMap[request.TaskId] == 1 {
+			c.statusMap[request.TaskId] = 2
+			c.edMap++
 		}
-		if taskId==-1{
-			reply.TaskType=3
-			reply.FileName="Waiting Stage"
-			c.mu.Unlock()
-		}else{
-			reply.TaskType=1
-			reply.TaskId=taskId
-			reply.FileName=c.files[taskId]
-			reply.NMap=c.nMap
-			reply.NReduce=c.nReduce	
-			// fmt.Printf("MapTask:%v allocated\n",reply.TaskId)
-			c.statusMap[taskId]=1
-			c.mu.Unlock()
-			
-			go func(taskId int){
-				time.Sleep(time.Duration(10)*time.Second)
-				c.mu.Lock()
-				if c.statusMap[taskId]==1{
-					c.statusMap[taskId]=0
-				}
-				c.mu.Unlock()
-			}(taskId)
+
+	case 2:
+		if c.statusReduce[request.TaskId] == 1 {
+			c.statusReduce[request.TaskId] = 2
+			c.edReduce++
 		}
-	}else if c.edReduce<c.nReduce{
-		taskId:=-1
-		for i :=0;i<c.nReduce;i++{
-			if c.statusReduce[i]==0 {
-				taskId=i
-				break
-			}
-		}
-		if taskId==-1{
-			reply.TaskType=3
-			reply.FileName="Waiting Stage"
-			c.mu.Unlock()
-		}else{
-			reply.TaskType=2
-			reply.TaskId=taskId
-			reply.FileName="Reduce Stage"
-			reply.NMap=c.nMap
-			reply.NReduce=c.nReduce	
-			c.statusReduce[taskId]=1
-			// fmt.Printf("ReduceTask:%v allocated\n",reply.TaskId)
-			c.mu.Unlock()
-			
-			go func(taskId int){
-				time.Sleep(time.Duration(10)*time.Second)
-				c.mu.Lock()
-				if c.statusReduce[taskId]==1{
-					c.statusReduce[taskId]=0
-				}
-				c.mu.Unlock()
-			}(taskId)
-		}
-	}else{
-		reply.TaskType=4
-		c.mu.Unlock()
 	}
-		
+	request.TaskType = 0
+
+	// allocate task
+	if c.edMap < c.nMap {
+		// find undo task's id
+		taskId := -1
+		for i := 0; i < c.nMap; i++ {
+			if c.statusMap[i] == 0 {
+				taskId = i
+				break
+			}
+		}
+		if taskId == -1 {
+			reply.TaskType, reply.FileName =
+				3, "Waiting Stage"
+
+		} else {
+			reply.TaskType, reply.TaskId, reply.FileName, reply.NMap, reply.NReduce =
+				1, taskId, c.files[taskId], c.nMap, c.nReduce
+			c.statusMap[taskId] = 1
+			/*
+				If the task is not completed within 10 seconds,
+				the status will be reset and the task will be reassigned
+			*/
+			go func(taskId int) {
+				time.Sleep(time.Duration(10) * time.Second)
+				c.mu.Lock()
+				if c.statusMap[taskId] == 1 {
+					c.statusMap[taskId] = 0
+				}
+				c.mu.Unlock()
+			}(taskId)
+		}
+	} else if c.edReduce < c.nReduce {
+		taskId := -1
+		for i := 0; i < c.nReduce; i++ {
+			if c.statusReduce[i] == 0 {
+				taskId = i
+				break
+			}
+		}
+		if taskId == -1 {
+			reply.TaskType, reply.FileName =
+				3, "Waiting Stage"
+		} else {
+			reply.TaskType, reply.TaskId, reply.FileName, reply.NMap, reply.NReduce =
+				2, taskId, "Reduce Stage", c.nMap, c.nReduce
+			c.statusReduce[taskId] = 1
+
+			go func(taskId int) {
+				time.Sleep(time.Duration(10) * time.Second)
+				c.mu.Lock()
+				if c.statusReduce[taskId] == 1 {
+					c.statusReduce[taskId] = 0
+				}
+				c.mu.Unlock()
+			}(taskId)
+		}
+	} else {
+		reply.TaskType = 4
+	}
+
 	return nil
 }
-		
-		
-		
-		
+
 //
 // an example RPC handler.
 //
@@ -134,9 +113,8 @@ func (c *Coordinator) Allocate(request *Request,reply *Reply)error {
 //
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
-return nil
+	return nil
 }
-
 
 //
 // start a thread that listens for RPCs from worker.go
@@ -161,9 +139,8 @@ func (c *Coordinator) server() {
 func (c *Coordinator) Done() bool {
 	// Your code here.
 	c.mu.Lock()
-	ret := c.nReduce==c.edReduce
-	c.mu.Unlock()
-	return ret
+	defer c.mu.Unlock()
+	return c.nReduce == c.edReduce
 	// return true
 }
 
@@ -174,15 +151,16 @@ func (c *Coordinator) Done() bool {
 //
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	// Your code here.
-	c := Coordinator{files,
-		len(files),
-		nReduce,
-		0,
-		make([]int,len(files)),
-		0,
-		make([]int,nReduce),
-		sync.Mutex{}}
-	
+	c := Coordinator{
+		files:        files,
+		nMap:         len(files),
+		nReduce:      nReduce,
+		edMap:        0,
+		statusMap:    make([]int, len(files)),
+		edReduce:     0,
+		statusReduce: make([]int, nReduce),
+	}
+
 	c.server()
 	return &c
 }

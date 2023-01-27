@@ -38,10 +38,10 @@ func (a ByKey) Len() int           { return len(a) }
 func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
 func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
-func solveMap(mapf func(string,string) []KeyValue,request *Request,reply *Reply){
-	//load data
-	file,err:=os.Open(reply.FileName)
-	if err!=nil{
+func solveMap(mapf func(string, string) []KeyValue, request *Request, reply *Reply) {
+	// load data
+	file, err := os.Open(reply.FileName)
+	if err != nil {
 		log.Fatalf("cannot open %v", reply.FileName)
 	}
 	content, err := ioutil.ReadAll(file)
@@ -49,46 +49,46 @@ func solveMap(mapf func(string,string) []KeyValue,request *Request,reply *Reply)
 		log.Fatalf("cannot read %v", file)
 	}
 	file.Close()
-	
-	//map process
+
+	// map process
 	intermediate := mapf(reply.FileName, string(content))
 
-	//buckets allocate 
-	buckets:=make([][]KeyValue,reply.NReduce)
-	for i :=0;i<reply.NReduce;i++{
-		buckets[i]=[]KeyValue{}
+	// buckets allocate
+	buckets := make([][]KeyValue, reply.NReduce)
+	for i := 0; i < reply.NReduce; i++ {
+		buckets[i] = []KeyValue{}
 	}
-	for _,kv:=range(intermediate){
-		reduceId:=ihash(kv.Key)%reply.NReduce
-		buckets[reduceId]=append(buckets[reduceId],kv)
+	for _, kv := range intermediate {
+		reduceId := ihash(kv.Key) % reply.NReduce
+		buckets[reduceId] = append(buckets[reduceId], kv)
 	}
-	
-	//store
-	mapId:=reply.TaskId
-	for i :=0;i<reply.NReduce;i++{
-		targetName:="mr-"+strconv.Itoa(mapId)+"-"+strconv.Itoa(i)
-		tmpName,_:=ioutil.TempFile("",targetName+".tmp")
+
+	// store
+	mapId := reply.TaskId
+	for i := 0; i < reply.NReduce; i++ {
+		targetName := "mr-" + strconv.Itoa(mapId) + "-" + strconv.Itoa(i)
+		tmpName, _ := ioutil.TempFile("", targetName+".tmp")
 		enc := json.NewEncoder(tmpName)
-		for _,kv:=range(buckets[i]){
+		for _, kv := range buckets[i] {
 			err := enc.Encode(&kv)
-			if err!=nil{
+			if err != nil {
 				log.Fatalf("cannot write %v", tmpName)
 			}
 		}
-		os.Rename(tmpName.Name(),targetName)
+		os.Rename(tmpName.Name(), targetName)
 		tmpName.Close()
 	}
-	request.TaskType=1
-	request.TaskId=reply.TaskId
+	request.TaskType, request.TaskId =
+		1, reply.TaskId
 }
 
-func solveReduce(reducef func(string,[]string)string,request *Request,reply *Reply){
-	//load data
-	intermediate:=[]KeyValue{}
-	for i:=0;i<reply.NMap;i++{
-		fileName:="mr-"+strconv.Itoa(i)+"-"+strconv.Itoa(reply.TaskId)
-		file,err:=os.Open(fileName)
-		if err!=nil{
+func solveReduce(reducef func(string, []string) string, request *Request, reply *Reply) {
+	// load data
+	intermediate := []KeyValue{}
+	for i := 0; i < reply.NMap; i++ {
+		fileName := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reply.TaskId)
+		file, err := os.Open(fileName)
+		if err != nil {
 			log.Fatalf("cannot open %v", fileName)
 		}
 		dec := json.NewDecoder(file)
@@ -101,10 +101,10 @@ func solveReduce(reducef func(string,[]string)string,request *Request,reply *Rep
 		}
 		file.Close()
 	}
-	//reduce process and store
+	// reduce process and store
 	sort.Sort(ByKey(intermediate))
-	
-	oname := "mr-out-"+strconv.Itoa(reply.TaskId)
+
+	oname := "mr-out-" + strconv.Itoa(reply.TaskId)
 	ofile, _ := os.Create(oname)
 	i := 0
 	for i < len(intermediate) {
@@ -117,69 +117,64 @@ func solveReduce(reducef func(string,[]string)string,request *Request,reply *Rep
 			values = append(values, intermediate[k].Value)
 		}
 		output := reducef(intermediate[i].Key, values)
-		
+
 		// this is the correct format for each line of Reduce output.
 		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
-		
+
 		i = j
 	}
-	
+
 	ofile.Close()
-	
-	//delete tmpfile
-	for i:=0;i<reply.NMap;i=i+1{
-		fileName:="mr-"+strconv.Itoa(i)+"-"+strconv.Itoa(reply.TaskId)
+
+	// delete tmpfile
+	for i := 0; i < reply.NMap; i = i + 1 {
+		fileName := "mr-" + strconv.Itoa(i) + "-" + strconv.Itoa(reply.TaskId)
 		err := os.Remove(fileName)
 		if err != nil {
 			log.Fatalf("cannot open delete" + fileName)
 		}
 	}
-	
-	request.TaskType=2
-	request.TaskId=reply.TaskId
+
+	request.TaskType, request.TaskId =
+		2, reply.TaskId
 }
 
 //
 // main/mrworker.go calls this function.
 //
 func Worker(mapf func(string, string) []KeyValue,
-reducef func(string, []string) string) {
+	reducef func(string, []string) string) {
 	// Your worker implementation here.
 	request := Request{}
 	reply := Reply{}
-	for
-	{
-		// fmt.Println("--------------------------------------------------")
-		// fmt.Println(":",&reply)
-		ok := call("Coordinator.Allocate",&request,&reply)
-		// fmt.Println("::",&reply)
-
-		if ok {
-			switch reply.TaskType {
-				case 1 ://Map
-				{
-					// fmt.Printf("MapTask:%v is running...\n",reply.TaskId)
-					solveMap(mapf,&request,&reply)
-				}
-				case 2 ://Reduce
-				{
-					// fmt.Printf("ReduceTask:%v is running...\n",reply.TaskId)
-					solveReduce(reducef,&request,&reply) 
-				}
-				case 3://wait
-					// fmt.Println("The tasks are all allocated, waiting...")
-				default:
-				{
-					// fmt.Println("MapReduce Tasks all over,process exited")
-					return			
-				}
-			}
-			reply.TaskType=0
-			reply.TaskId=0
-			time.Sleep(time.Second/2)
-		}else{
+	for {
+		ok := call("Coordinator.Allocate", &request, &reply)
+		if !ok {
 			return
 		}
+		switch reply.TaskType {
+		// Map
+		case 1:
+			// fmt.Printf("MapTask:%v is running...\n",reply.TaskId)
+			solveMap(mapf, &request, &reply)
+
+		// Reduce
+		case 2:
+			// fmt.Printf("ReduceTask:%v is running...\n",reply.TaskId)
+			solveReduce(reducef, &request, &reply)
+
+		// wait
+		case 3:
+			// fmt.Println("The tasks are all allocated, waiting...")
+
+		// finished
+		default:
+			// fmt.Println("MapReduce Tasks all over,process exited")
+			return
+		}
+		reply = Reply{}
+		time.Sleep(500 * time.Millisecond)
+
 	}
 	// uncomment to send the Example RPC to the coordinator.
 	// CallExample()
