@@ -35,11 +35,18 @@ func nrand() int64 {
 	return x
 }
 
+type node struct {
+	ok    bool
+	reply interface{}
+}
+
 type Clerk struct {
 	sm       *shardctrler.Clerk
 	config   shardctrler.Config
 	make_end func(string) *labrpc.ClientEnd
 	// You will have to modify this struct.
+	clerkId   int64
+	commandId int
 }
 
 //
@@ -52,10 +59,14 @@ type Clerk struct {
 // send RPCs.
 //
 func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.ClientEnd) *Clerk {
-	ck := new(Clerk)
-	ck.sm = shardctrler.MakeClerk(ctrlers)
-	ck.make_end = make_end
 	// You'll have to add code here.
+	ck := &Clerk{
+		sm:        shardctrler.MakeClerk(ctrlers),
+		make_end:  make_end,
+		clerkId:   nrand(),
+		commandId: 0,
+	}
+	ck.config = ck.sm.Query(-1)
 	return ck
 }
 
@@ -66,33 +77,55 @@ func MakeClerk(ctrlers []*labrpc.ClientEnd, make_end func(string) *labrpc.Client
 // You will have to modify this function.
 //
 func (ck *Clerk) Get(key string) string {
-	args := GetArgs{}
-	args.Key = key
-
+	args := GetArgs{
+		Key:       key,
+		ClerkId:   ck.clerkId,
+		CommandId: ck.commandId,
+	}
+	ck.commandId++
+	resultChan := make(chan node)
 	for {
 		shard := key2shard(key)
+		args.Shard = shard
+		args.Term = ck.config.Num
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			// try each server for the shard.
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
-				var reply GetReply
-				ok := srv.Call("ShardKV.Get", &args, &reply)
-				if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
-					return reply.Value
+				go func() {
+					reply := GetReply{}
+					ok := srv.Call("ShardKV.Get", &args, &reply)
+					resultChan <- node{ok, reply}
+				}()
+
+				select {
+				case receive := <-resultChan:
+					ok, reply := receive.ok, receive.reply.(GetReply)
+					if ok && reply.Err != ErrWrongLeader {
+						switch reply.Err {
+						case ErrWrongGroup:
+							//组错了直接跳出循环更新配置
+							goto here
+						case ErrWaitMigrate:
+							si--
+							time.Sleep(50 * time.Millisecond)
+						default:
+							return reply.Value
+						}
+					}
+					// ... not ok, or ErrWrongLeader
+				case <-time.After(time.Millisecond * 500):
+					continue
 				}
-				if ok && (reply.Err == ErrWrongGroup) {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
+
 			}
+		here:
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
-
-	return ""
 }
 
 //
@@ -100,35 +133,56 @@ func (ck *Clerk) Get(key string) string {
 // You will have to modify this function.
 //
 func (ck *Clerk) PutAppend(key string, value string, op string) {
-	args := PutAppendArgs{}
-	args.Key = key
-	args.Value = value
-	args.Op = op
-
-
+	args := PutAppendArgs{
+		Key:       key,
+		Value:     value,
+		Op:        op,
+		CommandId: ck.commandId,
+		ClerkId:   ck.clerkId,
+	}
+	ck.commandId++
+	resultChan := make(chan node)
 	for {
 		shard := key2shard(key)
+		args.Shard = shard
+		args.Term = ck.config.Num
 		gid := ck.config.Shards[shard]
 		if servers, ok := ck.config.Groups[gid]; ok {
 			for si := 0; si < len(servers); si++ {
 				srv := ck.make_end(servers[si])
-				var reply PutAppendReply
-				ok := srv.Call("ShardKV.PutAppend", &args, &reply)
-				if ok && reply.Err == OK {
-					return
+				go func() {
+					reply := PutAppendReply{}
+					ok := srv.Call("ShardKV.PutAppend", &args, &reply)
+					resultChan <- node{ok, reply}
+				}()
+				select {
+				case receive := <-resultChan:
+					ok, reply := receive.ok, receive.reply.(PutAppendReply)
+					if ok && reply.Err != ErrWrongLeader {
+						switch reply.Err {
+						case ErrWrongGroup:
+							//组错了直接跳出循环更新配置
+							goto here
+						case ErrWaitMigrate:
+							si--
+							time.Sleep(50 * time.Millisecond)
+						default:
+							return
+						}
+					}
+				case <-time.After(time.Millisecond * 500):
+					continue
+
+					// ... not ok, or ErrWrongLeader
 				}
-				if ok && reply.Err == ErrWrongGroup {
-					break
-				}
-				// ... not ok, or ErrWrongLeader
 			}
+		here:
 		}
 		time.Sleep(100 * time.Millisecond)
 		// ask controler for the latest configuration.
 		ck.config = ck.sm.Query(-1)
 	}
 }
-
 func (ck *Clerk) Put(key string, value string) {
 	ck.PutAppend(key, value, "Put")
 }

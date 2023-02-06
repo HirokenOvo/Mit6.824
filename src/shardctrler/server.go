@@ -139,9 +139,15 @@ func (sc *ShardCtrler) Query(args *QueryArgs, reply *QueryReply) {
 		ClientId:  args.ClientId,
 	}
 	reply.WrongLeader = sc.solve("Query", args.CommandId, args.ClientId, JoinArgs{}, LeaveArgs{}, MoveArgs{}, arg)
+	sc.mu.Lock()
 	if !reply.WrongLeader {
 		reply.Config = sc.GetConfig(args.Num)
+		// raft.DPrintf("Query%v:%v\n", arg.Num, reply.Config.Gid2Shards)
+		// for i, s := range sc.configs {
+		// 	raft.DPrintf("%v:%v", i, s.Gid2Shards)
+		// }
 	}
+	sc.mu.Unlock()
 }
 
 func (sc *ShardCtrler) GetConfig(idx int) Config {
@@ -149,6 +155,16 @@ func (sc *ShardCtrler) GetConfig(idx int) Config {
 		return sc.configs[len(sc.configs)-1]
 	}
 	return sc.configs[idx]
+}
+
+func getShards(tar int, origin [NShards]int) []int {
+	ans := make([]int, 0)
+	for i := 0; i < NShards; i++ {
+		if origin[i] == tar {
+			ans = append(ans, i)
+		}
+	}
+	return ans
 }
 
 func (sc *ShardCtrler) ReBanlance(lastConfig *Config) {
@@ -160,7 +176,7 @@ func (sc *ShardCtrler) ReBanlance(lastConfig *Config) {
 	res := NShards % nGid
 	//Go的map遍历顺序不确定,将已有的gid排序后确定遍历顺序使得所有副本的分片一致
 	idxGid := make([]int, 0)
-	for gid := range lastConfig.Gid2Shards {
+	for gid := range lastConfig.Groups {
 		idxGid = append(idxGid, gid)
 	}
 
@@ -168,7 +184,7 @@ func (sc *ShardCtrler) ReBanlance(lastConfig *Config) {
 
 	for _, gid := range idxGid {
 		tar := avg
-		shards := lastConfig.Gid2Shards[gid]
+		shards := getShards(gid, lastConfig.Shards)
 		if res > 0 {
 			tar++
 		}
@@ -192,7 +208,7 @@ func (sc *ShardCtrler) ReBanlance(lastConfig *Config) {
 	}
 
 	for _, gid := range idxGid {
-		shards := lastConfig.Gid2Shards[gid]
+		shards := getShards(gid, lastConfig.Shards)
 		for len(shards) < avg && len(bucket) > 0 {
 			shards = append(shards, bucket[len(bucket)-1])
 			lastConfig.Shards[bucket[len(bucket)-1]] = gid
@@ -218,6 +234,8 @@ func (sc *ShardCtrler) Copy(now *Config, pre *Config) {
 	for gid, shards := range pre.Gid2Shards {
 		now.Gid2Shards[gid] = shards
 	}
+
+	now.Num = len(sc.configs)
 }
 
 func (sc *ShardCtrler) ApplierMonitor() {
@@ -231,7 +249,6 @@ func (sc *ShardCtrler) ApplierMonitor() {
 				cfg := Config{}
 				lastConfig := sc.GetConfig(-1)
 				sc.Copy(&cfg, &lastConfig)
-				cfg.Num = len(sc.configs)
 				// Join(servers) -- add a set of groups (gid -> server-list mapping).
 				// 添加新组
 				if cmd.Tp == "Join" {
@@ -243,34 +260,31 @@ func (sc *ShardCtrler) ApplierMonitor() {
 					}
 
 					sc.ReBanlance(&cfg)
+					// raft.DPrintf("newconfig[%v]:%v", cfg.Num, cfg.Gid2Shards)
 					sc.configs = append(sc.configs, cfg)
+					// for i, s := range sc.configs {
+					// 	raft.DPrintf("%v:%v", i, s.Gid2Shards)
+					// }
 				}
 				// Leave(gids) -- delete a set of groups.
 				// 删除指定组,组内的分片定义为未分配,rebanlance重新分配
 				if cmd.Tp == "Leave" {
 					cmd := cmd.LeaveCmd
 
-					for gid := range cfg.Groups {
-						f := true
-						for _, ngid := range cmd.GIDs {
-							if ngid == gid {
-								f = false
-								break
-							}
+					for _, leaveGid := range cmd.GIDs {
+						for _, shard := range cfg.Gid2Shards[leaveGid] {
+							cfg.Shards[shard] = 0
 						}
-						if !f {
-							for i := 0; i < 10; i++ {
-								if cfg.Shards[i] == gid {
-									cfg.Shards[i] = 0
-								}
-							}
-
-							delete(cfg.Groups, gid)
-							delete(cfg.Gid2Shards, gid)
-						}
+						delete(cfg.Gid2Shards, leaveGid)
+						delete(cfg.Groups, leaveGid)
 					}
+
 					sc.ReBanlance(&cfg)
+					// raft.DPrintf("newconfig[%v]:%v", cfg.Num, cfg.Gid2Shards)
 					sc.configs = append(sc.configs, cfg)
+					// for i, s := range sc.configs {
+					// 	raft.DPrintf("%v:%v\t%v", i, s.Gid2Shards, s.Shards)
+					// }
 				}
 				// Move(shard, gid) -- hand off one shard from current owner to gid.
 				if cmd.Tp == "Move" {
@@ -284,6 +298,7 @@ func (sc *ShardCtrler) ApplierMonitor() {
 					}
 					cfg.Gid2Shards[cmd.GID] = append(cfg.Gid2Shards[cmd.GID], cmd.Shard)
 					cfg.Shards[cmd.Shard] = cmd.GID
+					// raft.DPrintf("newconfig[%v]:%v", cfg.Num, cfg.Gid2Shards)
 					sc.configs = append(sc.configs, cfg)
 				}
 				// Query(num) -> fetch Config # num, or latest config if num==-1.

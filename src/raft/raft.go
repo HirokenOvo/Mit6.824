@@ -449,7 +449,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if preLogIndex+idx+1 <= 0 {
 			continue
 		}
-		if rf.getFakeLastIdx() < preLogIndex+idx+1 || rf.log[preLogIndex+idx+1] != args.Entries[idx] {
+		if rf.getFakeLastIdx() < preLogIndex+idx+1 || rf.log[preLogIndex+idx+1].Term != args.Entries[idx].Term {
 			conflictIdx = idx
 			break
 		}
