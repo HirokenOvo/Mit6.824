@@ -17,8 +17,8 @@ const (
 	ErrWrongGroup  = "ErrWrongGroup"
 	ErrWrongLeader = "ErrWrongLeader"
 	ErrWaitMigrate = "ErrWaitMigrate"
-	Debug          = true
-	// Debug = false
+	// Debug          = true
+	Debug = false
 )
 
 func DPrintf(format string, a ...interface{}) (n int, err error) {
