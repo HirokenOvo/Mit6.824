@@ -69,6 +69,7 @@ func (rf *Raft) switchState(state int) {
 			rf.nextIndex[peer] = rf.getRealLen()
 			rf.matchIndex[peer] = 0
 		}
+		Dg(dLeader, "S%d become leader,len:%v,currentTerm%v\n", rf.me, rf.getRealLen(), rf.currentTerm)
 		// DPrintf("peer[%v] become leader,len:%v,currentTerm%v\n", rf.me, rf.getRealLen(), rf.currentTerm)
 	}
 }
@@ -279,6 +280,7 @@ func (rf *Raft) SendInstallSnapshotEntries(peer int) {
 	}
 
 	rf.mu.Lock()
+	Dg(dSnap, "S%v deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
 	// DPrintf("leader[%v] deliver to peer[%v] ->%v\n", rf.me, peer, rf.snapshot.LastIncludedIndex)
 	defer rf.mu.Unlock()
 
@@ -540,6 +542,7 @@ func (rf *Raft) leaderAppendEntries() {
 			if reply.Term > rf.currentTerm {
 				rf.currentTerm = reply.Term
 				rf.switchState(FOLLOWER)
+				Dg(dLog, "S%d failed to become leader,find Term bigger", rf.me)
 				// log.Printf("find Term bigger then Peer[%d],failed to become leader", rf.me)
 				return
 			}
@@ -609,6 +612,7 @@ func (rf *Raft) updateCommit() {
 				rf.lastApplied = max(rf.lastApplied, msg.CommandIndex)
 				rf.mu.Unlock()
 				rf.applyCh <- msg
+				Dg(dCommit, "S%d success commit log[%d] to client", rf.me, lastApplied+idx+1)
 				// DPrintf("Peer[%d] success commit log[%d] %v to client", rf.me, lastApplied+idx+1, msg.Command)
 			}
 		}()
@@ -760,6 +764,7 @@ func (rf *Raft) startElection() {
 			}
 
 			if reply.VoteGranted {
+				Dg(dVote, "S%d voted Peer[%d]", peer, rf.me)
 				// DPrintf("Peer[%d] voted Peer[%d]", peer, rf.me)
 				mu.Lock()
 				cnt++
